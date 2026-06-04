@@ -15,6 +15,7 @@ assembler will retrieve into the prompt depending on strategy:
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,6 +23,10 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from backend.sources.vector_store import ChromaRetrievalSource  # noqa: E402
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 BRD_TEMPLATE_DOC = """\

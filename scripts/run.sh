@@ -6,11 +6,12 @@
 # INT/TERM/HUP/EXIT kills child PIDs and runs `docker compose down`).
 #
 # Usage (from anywhere):
-#   /home/azureuser/temp/PoC/brd_agent/run.sh
+#   /path/to/brd_agent/scripts/run.sh
 set -uo pipefail
 
-# Always operate from this script's directory.
-cd "$(dirname "$(readlink -f "$0")")"
+# Always operate from the project root, even though this script lives in scripts/.
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+cd "$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(pwd)"
 VENV="$PROJECT_ROOT/.venv"
 LOG_DIR="$PROJECT_ROOT/.logs"
