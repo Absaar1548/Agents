@@ -1,0 +1,26 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: brd_agent_neo4j
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt driver
+    environment:
+      # Auth — must match NEO4J_USER / NEO4J_PASSWORD in .env
+      NEO4J_AUTH: neo4j/brd_agent_neo4j_pw
+      # Memory pages — small heap is fine for the PoC ontology
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
