@@ -4,13 +4,13 @@ This diagram models the BRD Agent as a **3-state machine** with **2 Human-in-the
 
 ```mermaid
 stateDiagram-v2
-    [*] --> InformationGathering: User starts chat
+    [*] --> AgentInteraction: User starts chat
 
-    InformationGathering: 🟡 Information Gathering
-    InformationGathering: feedback_gathering = false
-    InformationGathering: current_draft = null
-    InformationGathering: approved = false
-    note right of InformationGathering
+    AgentInteraction: 🟡 Agent Interaction
+    AgentInteraction: feedback_gathering = false
+    AgentInteraction: current_draft = null
+    AgentInteraction: approved = false
+    note right of AgentInteraction
         Universal entry point.
         Ingest docs, ask clarifying
         questions, collect ALL
@@ -20,10 +20,10 @@ stateDiagram-v2
         from Review Mode.
     end note
 
-    InformationGathering --> InformationGathering: /chat (answer question)
-    InformationGathering --> InformationGathering: /request-changes (more feedback)
-    InformationGathering --> HITL1: Auto-transition<br/>"Enough Info? = YES"
-    InformationGathering --> HITL1: Feedback complete<br/>user said "no more reviews"
+    AgentInteraction --> AgentInteraction: /chat (answer question)
+    AgentInteraction --> AgentInteraction: /request-changes (more feedback)
+    AgentInteraction --> HITL1: Auto-transition<br/>"Sufficient detail gathered? = YES"
+    AgentInteraction --> HITL1: Feedback complete<br/>user said "no more reviews"
 
     HITL1: 👤 HITL 1:
     HITL1: Review Summary &
@@ -38,7 +38,7 @@ stateDiagram-v2
     end note
 
     HITL1 --> BRDProduction: User confirms "Yes, proceed"
-    HITL1 --> InformationGathering: User says "No, need more info"
+    HITL1 --> AgentInteraction: User says "No, need more info"
 
     BRDProduction: 🟢 BRD Production
     BRDProduction: mode = "drafting"
@@ -54,7 +54,7 @@ stateDiagram-v2
     end note
 
     BRDProduction --> ReviewMode: Auto-transition<br/>(on success)
-    BRDProduction --> InformationGathering: On failure<br/>(error → retry)
+    BRDProduction --> AgentInteraction: On failure<br/>(error → retry)
 
     ReviewMode: 🔵 Review Mode (HITL 2)
     ReviewMode: mode = "awaiting_approval"
@@ -68,7 +68,7 @@ stateDiagram-v2
     end note
 
     ReviewMode --> Approved: POST /approve (HITL 2 = Accept)
-    ReviewMode --> InformationGathering: POST /request-changes (HITL 2 = Changes)
+    ReviewMode --> AgentInteraction: POST /request-changes (HITL 2 = Changes)
 
     Approved: ✅ Approved
     Approved: mode = "approved"
@@ -90,21 +90,22 @@ A state is uniquely identified by the tuple: **(mode, feedback_gathering, curren
 
 | State Name | mode | feedback_gathering | current_draft | approved | Entry From | Exit To | HITL |
 |---|---|---|---|---|---|---|---|
-| **🟡 Information Gathering** | `gathering` | `false` | `null` | `false` | `*` (start) / HITL1 (No) / ReviewMode (changes) | HITL1 (auto) | — |
-| **🟡 Information Gathering (Feedback Sub-loop)** | `request_changes` | `true` | `BRDResponse` | `false` | ReviewMode (changes) | HITL1 (feedback complete) | — |
-| **👤 HITL 1** | `gathering` | `false` | `null` or `BRDResponse` | `false` | 🟡 Gathering (ready) | 🟢 Production (Yes) / 🟡 Gathering (No) | Gate before Production |
+| **🟡 Agent Interaction** | `gathering` | `false` | `null` | `false` | `*` (start) / HITL1 (No) / ReviewMode (changes) | HITL1 (auto) | — |
+| **🟡 Agent Interaction (Feedback Sub-loop)** | `request_changes` | `true` | `BRDResponse` | `false` | ReviewMode (changes) | HITL1 (feedback complete) | — |
+| **👤 HITL 1** | `gathering` | `false` | `null` or `BRDResponse` | `false` | 🟡 Agent Interaction (ready) | 🟢 Production (Yes) / 🟡 Agent Interaction (No) | Gate before Production |
 | **🟢 BRD Production** | `drafting` | `false` | `BRDResponse` (writing) | `false` | HITL1 (Yes) | 🔵 Review (auto) | — |
-| **🔵 Review Mode (HITL 2)** | `awaiting_approval` | `false` | `BRDResponse` | `false` | 🟢 Production | ✅ Approved (accept) / 🟡 Gathering (changes) | Gate after Production |
+| **🔵 Review Mode (HITL 2)** | `awaiting_approval` | `false` | `BRDResponse` | `false` | 🟢 Production | ✅ Approved (accept) / 🟡 Agent Interaction (changes) | Gate after Production |
 | **✅ Approved** | `approved` | `false` | `BRDResponse` | `true` | 🔵 Review (accept) | `*` (reset) | — |
 
 ## Design Rules
 
-1. **🟡 Gathering is the universal entry point** — initial prompts, clarifications, and review changes all enter here.
+1. **🟡 Agent Interaction is the universal entry point** — initial prompts, clarifications, and review changes all enter here.
 2. **🟢 Production is atomic per cycle** — Within each production cycle, the BRD is produced/updated **all at once** with the complete gathered context. Multiple cycles are allowed until the user is satisfied.
-3. **Feedback reviews** — If user wants changes at HITL 2, agent asks *"Any more reviews?"* and keeps looping inside 🟡 Gathering until user says no. Then it exits to HITL 1 and applies everything at once.
-4. **HITL 1 is mandatory** — The agent cannot auto-jump to 🟢 Production. It must pause, present a summary of gathered requirements, and get explicit user approval. This prevents premature drafting.
+3. **Feedback re-entry is not a separate mode** — it is the same Agent Interaction loop, entered with the current draft in context. The user may attach supporting documents with feedback, and the loop ends at the same HITL 1 gate.
+4. **HITL 1 is the single per-cycle approval** — for both generation and updates. The agent cannot auto-jump to 🟢 Production; it must pause and present a summary (gathered requirements for a new BRD, or the concrete planned change for an update) and get explicit approval. The user either proceeds or adds more feedback. This prevents premature drafting.
 5. **🟢 → 🔵 is auto** — Once production starts, it completes and auto-delivers to Review Mode. No user action needed mid-production.
 6. **Only 🔵 → 🟡 requires user action** — Requesting changes from HITL 2 is the only backward transition triggered by the user.
+7. **The Knowledge Graph is a pre-seeded enterprise KB** — Ingestion populates the Vector DB only; the agent reads enterprise context from the KG but does not write to it. Enriching the KG from ingested documents is a future option.
 
 ## Draft Lifecycle with Feedback
 

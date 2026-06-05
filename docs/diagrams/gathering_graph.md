@@ -1,6 +1,6 @@
-# Gathering Graph Sequence Diagram (Universal Entry + Feedback Gatherings)
+# Agent Interaction Graph Sequence Diagram (Universal Entry + Feedback Gatherings)
 
-This diagram shows the exact step-by-step execution inside the **Gathering Graph**, which is now the **universal entry point** for all user input — initial prompts, clarifications, and review feedback.
+This diagram shows the exact step-by-step execution inside the **Agent Interaction Graph**, which is now the **universal entry point** for all user input — initial prompts, clarifications, and review feedback.
 
 ```mermaid
 sequenceDiagram
@@ -83,7 +83,7 @@ sequenceDiagram
         alt enough_info == true OR (feedback_gathering == true AND user says "no more reviews")
             N3->>S: feedback_gathering = false (if applicable)
             N3->>E: queue HITL 1 — present summary for user confirmation
-            Note over N3: Agent asks: "I've gathered enough info.
+            Note over N3: Agent asks: "I've gathered sufficient detail gathered.
             Note over N3: Here's a summary. Shall I proceed?"
         else
             Note over N3: Continue gathering / feedback collection
@@ -128,11 +128,11 @@ sequenceDiagram
 
 ### 1. Universal Entry Point
 - **Before:** `/chat` and `/request-changes` were separate paths with different semantics.
-- **Now:** Both endpoints route through the **same Gathering Graph**. `/request-changes` simply sets `feedback_gathering = true` and appends feedback to `pending_feedback` before entering the graph.
+- **Now:** Both endpoints route through the **same Agent Interaction Graph**. `/request-changes` simply sets `feedback_gathering = true` and appends feedback to `pending_feedback` before entering the graph.
 
-### 2. Feedback Gathering Loop
+### 2. Feedback Collection Loop
 - **Before:** Each `/request-changes` call immediately triggered a new draft generation after one turn of discussion.
-- **Now:** The agent asks *"Any more reviews?"* and loops inside Gathering until the user explicitly signals completion. All feedback is accumulated in `pending_feedback` and applied atomically in the next Production cycle.
+- **Now:** The agent asks *"Any more reviews?"* and loops inside Agent Interaction until the user explicitly signals completion. All feedback is accumulated in `pending_feedback` and applied atomically in the next Production cycle.
 
 ### 3. Strategy Inference Priority
 ```

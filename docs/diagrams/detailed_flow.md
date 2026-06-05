@@ -1,6 +1,6 @@
 # Detailed Flow Diagram — BRD Agent (3-State + HITL Gates)
 
-This diagram shows the complete data flow from user input through all system components, including state mutations at each step, with the **3-state simplified design** (universal gathering, atomic production per cycle, feedback gathering) and the **2 HITL gates**.
+This diagram shows the complete data flow from user input through all system components, including state mutations at each step, with the **3-state simplified design** (universal agent interaction, atomic production per cycle, feedback gathering) and the **2 HITL gates**.
 
 ```mermaid
 flowchart TB
@@ -32,7 +32,7 @@ flowchart TB
         S9["feedback_gathering: bool"]
     end
 
-    subgraph GATHER["🔵 Gathering Graph (Universal Entry)"]
+    subgraph GATHER["🔵 Agent Interaction Graph (Universal Entry)"]
         G1["summarize"]
         G2["retrieve_context"]
         G3["invoke_llm"]
@@ -47,7 +47,7 @@ flowchart TB
 
     subgraph SOURCES["🗃️ Data Sources"]
         CH["Chroma Vector Store<br/>(templates, glossary, prior BRDs, docs)"]
-        NEO["Neo4j KG<br/>(stakeholders, systems, domains)"]
+        NEO["Neo4j KG / Enterprise KB<br/>(stakeholders, systems, domains)"]
         ART["Artifact Store<br/>(template refs, large outputs)"]
     end
 
@@ -107,7 +107,7 @@ flowchart TB
     G3 --> |"write"| S5
 
     %% Feedback gathering + HITL1 decision inside invoke_llm
-    G3 --> |"if enough_info OR feedback complete"| DEC_BATCH{"Enough Info / Feedback Complete?"}
+    G3 --> |"if enough_info OR feedback complete"| DEC_BATCH{"Sufficient detail gathered / Feedback Complete?"}
     DEC_BATCH --> |"YES"| HITL1["👤 HITL 1:<br/>Review Summary &<br/>Proceed to Production?"]
     HITL1 --> |"User confirms"| E2
     HITL1 --> |"User says No — need more"| E1R["Return {reply, summary, ready_for_production: false}"]
@@ -185,7 +185,7 @@ flowchart TB
 
 - **Solid arrows (→):** Data flow / state mutation.
 - **Dashed arrows (-.->):** Telemetry / side-effect spans.
-- **Blue nodes:** Gathering graph execution (universal entry).
+- **Blue nodes:** Agent Interaction graph execution (universal entry).
 - **Green nodes:** Drafting graph execution (atomic production).
 - **Yellow decisions:** HITL 1 gate and feedback collection points.
 - **Orange node:** HITL 1 checkpoint — user must review summary and confirm before production.
@@ -193,8 +193,8 @@ flowchart TB
 
 ## Key Flow Changes (vs. previous version)
 
-1. **All user input routes through `/chat` or `/request-changes` → Gathering Graph.** No direct production entry except via **HITL 1 confirmation**.
-2. **HITL 1 gate replaces auto-transition** — After "Enough Info? = Yes" or feedback collection complete, the agent presents a summary and asks the user to confirm before calling `/generate-brd`. Prevents premature drafting.
+1. **All user input routes through `/chat` or `/request-changes` → Agent Interaction Graph.** No direct production entry except via **HITL 1 confirmation**.
+2. **HITL 1 gate replaces auto-transition** — After "Sufficient detail gathered? = Yes" or feedback collection complete, the agent presents a summary and asks the user to confirm before calling `/generate-brd`. Prevents premature drafting.
 3. **`pending_feedback` accumulates in state** during feedback gathering. Only cleared after successful schema validation.
 4. **`feedback_gathering` flag** controls the "Any more reviews?" loop. When cleared, the system reaches HITL 1 (not auto-production).
 5. **Drafting Graph reads `pending_feedback`** and includes it in the assembled context for atomic updates.
