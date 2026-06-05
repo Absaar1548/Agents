@@ -8,6 +8,7 @@ and surfaces a 500 to the client.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -18,6 +19,32 @@ from backend.schema import BRDResponse
 from backend.telemetry import KIND_TOOL, chat_span
 
 DRAFTED_BY = "brd-agent@0.1.0"
+
+
+def _extract_json(raw: str) -> str:
+    """Try to extract a JSON object from raw LLM output.
+
+    Some models (especially via Ollama) ignore response_format=json_object
+    when the conversation context is long and return plain text or wrap the
+    JSON in markdown fences.  This helper:
+      1. Strips ```json ... ``` or ``` ... ``` fences.
+      2. Falls back to the first {...} block found in the text.
+      3. Returns the original string if no fences/blocks are detected.
+    """
+    stripped = raw.strip()
+
+    # 1. Markdown code fences
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1)
+
+    # 2. First top-level JSON object {...}
+    obj_match = re.search(r"(\{.*\})", stripped, re.DOTALL)
+    if obj_match:
+        return obj_match.group(1)
+
+    # 3. Nothing detected — return as-is and let json.loads fail clearly
+    return stripped
 
 
 def schema_validate(
@@ -36,7 +63,8 @@ def schema_validate(
     ) as span:
         span.set_attribute("schema.id", "BRDResponse")
         try:
-            data = json.loads(raw)
+            candidate = _extract_json(raw)
+            data = json.loads(candidate)
             data["drafted_by"] = DRAFTED_BY
             brd = BRDResponse.model_validate(data)
             span.set_attribute("schema.outcome", "valid")

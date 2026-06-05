@@ -32,7 +32,7 @@ from langgraph.graph.message import add_messages
 
 from backend.artifacts import ArtifactStore
 from backend.context_assembler import ContextAssembler
-from backend.llm import AzureOpenAIClient
+from backend.llm import BaseLLMClient
 
 
 ChatMode = Literal["gathering", "drafting", "request_changes"]
@@ -62,7 +62,7 @@ class AgentRuntime:
     node — these are construction-time singletons, not per-turn config.
     """
 
-    llm: AzureOpenAIClient
+    llm: BaseLLMClient
     memory_manager: Any            # langmem.MemoryStoreManager
     store: Any                     # langgraph.store.base.BaseStore
     assembler: ContextAssembler    # stateless; one instance per process

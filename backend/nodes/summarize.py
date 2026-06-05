@@ -34,10 +34,6 @@ from backend.telemetry import KIND_CHAIN, chat_span
 TRIM_THRESHOLD = 12   # summarize once messages cross this count
 KEEP_TAIL = 8         # always keep the most recent KEEP_TAIL turns raw
 
-_LLM_MODEL = "gpt-4o"
-_LLM_PROVIDER = "azure.openai"
-
-
 def _transcript(messages: list[BaseMessage]) -> str:
     lines: list[str] = []
     for m in messages:
@@ -106,8 +102,8 @@ def summarize(
         span.set_attribute("prompt.id", SUMMARIZE_PROMPT_ID)
         span.set_attribute("prompt.version", SUMMARIZE_PROMPT_VERSION)
         span.set_attribute("prompt.template_hash", SUMMARIZE_PROMPT_HASH)
-        span.set_attribute("llm.provider", _LLM_PROVIDER)
-        span.set_attribute("llm.model", _LLM_MODEL)
+        span.set_attribute("llm.provider", runtime.llm.provider)
+        span.set_attribute("llm.model", runtime.llm.model)
 
         transcript_text = _transcript(to_summarize)
         raw = runtime.llm.complete(

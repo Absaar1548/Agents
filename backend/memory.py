@@ -27,11 +27,12 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from langchain_openai import AzureChatOpenAI
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from langmem import create_memory_store_manager
 from pydantic import BaseModel, Field
+
+from backend.llm import build_langchain_llm
 
 
 # ----- BRDMemory schema -----
@@ -118,16 +119,6 @@ NAMESPACE_PREFIX = ("brd_agent",)
 NAMESPACE_TEMPLATE = ("brd_agent", "{langgraph_user_id}")
 
 
-def _build_langchain_llm() -> AzureChatOpenAI:
-    return AzureChatOpenAI(
-        azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
-        api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        temperature=0.0,
-    )
-
-
 def build_memory_manager() -> tuple[BaseStore, object]:
     """Return (store, manager). Manager only handles BRDMemory — the
     rolling summary is produced by the summarize node via a direct LLM
@@ -135,7 +126,7 @@ def build_memory_manager() -> tuple[BaseStore, object]:
     ConversationSummary is still the type-spec for state.rolling_summary.
     """
     store = InMemoryStore()  # no index= → no vector search
-    llm = _build_langchain_llm()
+    llm = build_langchain_llm()
     manager = create_memory_store_manager(
         llm,
         schemas=[BRDMemory],

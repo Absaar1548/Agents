@@ -53,7 +53,7 @@ from backend.tools.fetch_brd_template import (  # noqa: E402
     fetch_brd_template,
 )
 from langchain_core.messages import AIMessage  # noqa: E402
-from backend.llm import AzureOpenAIClient  # noqa: E402
+from backend.llm import create_llm_client  # noqa: E402
 from backend.memory import build_memory_manager, read_memory  # noqa: E402
 from backend.schema import BRDResponse  # noqa: E402
 from backend.session import get_session, reset_session  # noqa: E402
@@ -159,7 +159,7 @@ def _current_draft(thread_id: str) -> Optional[BRDResponse]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_telemetry()
-    llm = AzureOpenAIClient()
+    llm = create_llm_client()
     store, manager = build_memory_manager()
 
     # Docs source (Phase 3). If the Chroma collection is empty, log a warning

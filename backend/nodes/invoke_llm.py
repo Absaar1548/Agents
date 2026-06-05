@@ -15,10 +15,6 @@ from opentelemetry.trace import SpanKind
 from backend.graph import AgentRuntime, ChatbotState
 from backend.telemetry import KIND_CHAIN, chat_span
 
-_LLM_MODEL = "gpt-4o"
-_LLM_PROVIDER = "azure.openai"
-
-
 def invoke_llm(
     state: ChatbotState,
     config: RunnableConfig,
@@ -44,8 +40,8 @@ def invoke_llm(
         span.set_attribute(
             "prompt.template_hash", assembled.get("prompt_template_hash", "")
         )
-        span.set_attribute("llm.provider", _LLM_PROVIDER)
-        span.set_attribute("llm.model", _LLM_MODEL)
+        span.set_attribute("llm.provider", runtime.llm.provider)
+        span.set_attribute("llm.model", runtime.llm.model)
         span.set_attribute("llm.temperature", 0.4)
         span.set_attribute("llm.max_tokens", 800)
         span.set_attribute("messages.count", len(messages))

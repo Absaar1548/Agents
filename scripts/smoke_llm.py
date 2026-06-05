@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from backend.telemetry import chat_span, flush_telemetry, init_telemetry  # noqa: E402
-from backend.llm import AzureOpenAIClient  # noqa: E402
+from backend.llm import create_llm_client  # noqa: E402
 from backend.schema import (  # noqa: E402
     BRDResponse,
     FunctionalRequirement,
@@ -29,7 +29,7 @@ def main() -> None:
     init_telemetry()
     print("telemetry initialized")
 
-    llm = AzureOpenAIClient()
+    llm = create_llm_client()
     session_id = uuid.uuid4().hex
 
     with chat_span("smoke.llm_roundtrip", session_id=session_id, turn_id=1):
@@ -38,7 +38,7 @@ def main() -> None:
                 {"role": "system", "content": "Reply in one short sentence."},
                 {"role": "user", "content": "Say hello and name yourself in one sentence."},
             ],
-            max_tokens=60,
+            max_tokens=500,
         )
     print(f"LLM reply: {text!r}")
 
