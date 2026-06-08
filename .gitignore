@@ -7,3 +7,5 @@ __pycache__/
 .pytest_cache/
 .streamlit/
 .claude/
+docs/Team Docs/
+Implementation Plan/

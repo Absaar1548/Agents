@@ -1,18 +1,19 @@
-# Context Assembly Flow Diagram (Simplified 3-State)
+# Context Assembly Flow Diagram v2.0 (Chassis-Aligned)
 
-This diagram decomposes how `ContextAssembler.assemble()` builds the LLM prompt for each turn, now updated for the **feedback gathering** and **atomic production** design.
+This diagram decomposes how `ContextAssembler.assemble()` builds the LLM prompt for each turn, updated for **semantic routing**, **validation error injection** (retry loop), **Presidio guardrails**, and **atomic production**.
 
 ```mermaid
 flowchart TB
     subgraph INPUT["🎯 Assembler Inputs"]
         I1["mode: ChatMode"]
         I2["messages: list[BaseMessage]"]
-        I3["brd_memory: dict"]
+        I3["brd_memory: dict (checkpointed)"]
         I4["rolling_summary: dict"]
         I5["current_draft: dict"]
-        I6["ContextStrategy"]
-        I7["pending_feedback: list[str]<br/>[NEW]"]
-        I8["feedback_gathering: bool<br/>[NEW]"]
+        I6["ContextStrategy (semantic router)"]
+        I7["pending_feedback: list[str]"]
+        I8["feedback_gathering: bool"]
+        I9["validation_errors: list[str]<br/>(v2: retry loop injection)"]
     end
 
     subgraph LAYERS["📚 Prompt Stack Layers"]
@@ -24,7 +25,8 @@ flowchart TB
         L4["L4: KG Retrieval Block<br/>Neo4j entities + 1-hop neighbours"]
         L5["L5: Artifact Summary Block<br/>Template refs, tool outputs"]
         L6["L6: Draft + Feedback Block<br/>(current_draft + ALL pending_feedback)<br/>[REFINEMENT / BRD_UPDATE only]"]
-        L7["L7: Conversation Slice<br/>recent N turns (strategy-dependent)"]
+        L7["L7: Validation Errors Block<br/>(v2: injected on retry)<br/>[DRAFTING retry only]"]
+        L8["L8: Conversation Slice<br/>recent N turns (strategy-dependent)"]
     end
 
     subgraph OUTPUT["📤 Assembler Output"]
@@ -47,7 +49,8 @@ flowchart TB
     I6 --> |"include_artifacts"| L5
     I5 --> |"if REFINEMENT / BRD_UPDATE"| L6
     I7 --> |"if REFINEMENT / BRD_UPDATE"| L6
-    I2 --> |"slice recent N turns"| L7
+    I9 --> |"if retry_count > 0"| L7
+    I2 --> |"slice recent N turns"| L8
 
     L0 --> O1
     L1 --> O1
@@ -57,6 +60,7 @@ flowchart TB
     L5 --> O1
     L6 --> O1
     L7 --> O1
+    L8 --> O1
     O1 --> O2
     O1 --> O3
     O1 --> O4
@@ -83,17 +87,17 @@ flowchart TB
 
     S1 -.->|"modifies"| L7
     S2 -.->|"modifies"| L7
-    S3 -.->|"injects"| L6
-    S3 -.->|"modifies"| L7
-    S4 -.->|"modifies"| L7
-    S4 -.->|"boosts"| L3
-    S4 -.->|"boosts"| L4
-    S5 -.->|"injects"| L6
-    S5 -.->|"modifies"| L7
-    S5 -.->|"boosts"| L3
-    S5 -.->|"boosts"| L4
-    S6 -.->|"injects"| L5
-    S7 -.->|"boosts"| L4
+    S3 -.-> |"injects"| L6
+    S3 -.-> |"modifies"| L8
+    S4 -.-> |"modifies"| L8
+    S4 -.-> |"boosts"| L3
+    S4 -.-> |"boosts"| L4
+    S5 -.-> |"injects"| L6
+    S5 -.-> |"modifies"| L8
+    S5 -.-> |"boosts"| L3
+    S5 -.-> |"boosts"| L4
+    S6 -.-> |"injects"| L5
+    S7 -.-> |"boosts"| L4
 ```
 
 ## Layer Build Order
@@ -110,11 +114,12 @@ The `ContextAssembler` always constructs the prompt in this **fixed order**:
 4. **Document Retrieval** (`L3`) — Chroma hits.
 5. **Knowledge Graph** (`L4`) — Neo4j hits.
 6. **Artifact Summaries** (`L5`) — `ArtifactRef` items.
-7. **Draft + Feedback** (`L6`) — **NEW:** Only in `REFINEMENT` and `BRD_UPDATE`. Shows:
+7. **Draft + Feedback** (`L6`) — Only in `REFINEMENT` and `BRD_UPDATE`. Shows:
    - Current draft JSON (as baseline)
    - **ALL** items from `pending_feedback` numbered 1..N
    - Instruction: "Apply all feedback items atomically. Preserve unchanged sections."
-8. **Conversation Slice** (`L7`) — Recent `HumanMessage` / `AIMessage` objects.
+8. **Validation Errors** (`L7`) — **v2:** Only injected during drafting retries (`retry_count > 0`). Shows the Pydantic validation error details so the LLM can self-correct (Chassis §3.5: pre-HITL self-check).
+9. **Conversation Slice** (`L8`) — Recent `HumanMessage` / `AIMessage` objects.
 
 ## Token Accounting
 
@@ -139,9 +144,14 @@ When `REFINEMENT` or `BRD_UPDATE` is active, `draft_feedback` includes:
 - All pending feedback items (may be 100–500 tokens)
 - This can significantly increase total prompt size.
 
-## Strategy Decision Logic (Updated)
+When retrying (drafting graph validation loop), `validation_errors` adds:
+- Pydantic error details (typically 50–200 tokens)
+- Self-correction instruction (typically 50 tokens)
+
+## Strategy Decision Logic (v2 — Semantic Router)
 
 ```
+# Priority 1: Explicit mode/flag overrides
 if feedback_gathering == true:
     if current_draft exists:
         return BRD_UPDATE
@@ -154,14 +164,20 @@ elif mode == "drafting":
         return BRD_GENERATION
 elif mode == "request_changes":
     return REFINEMENT
-elif user_message contains "template":
-    return TEMPLATE_GUIDED
-elif user_message contains "compliance" or "regulatory":
-    return COMPLIANCE_HEAVY
-elif user_message contains "clarify" or "explain":
-    return CLARIFICATION
-else:
-    return INFORMATION_GATHERING
+
+# Priority 2: Semantic router (v2 — replaces keyword matching)
+route = semantic_router.classify(user_message)
+#   Uses embedding-based intent classification with
+#   example utterances per route. FastEmbed encoder
+#   (local, no API key). Routes: TEMPLATE_GUIDED,
+#   COMPLIANCE_HEAVY, CLARIFICATION
+if route is not None:
+    return route
+
+# Priority 3: Default fallback
+return INFORMATION_GATHERING
 ```
 
-**Observation:** The keyword matching is still brittle. A user saying "I want to be **compliant** with GDPR" triggers `COMPLIANCE_HEAVY`, but "We need to follow privacy rules" would not.
+**v2 improvement:** The `semantic-router` library uses embedding similarity against curated example utterances per route. This means "We need to follow privacy rules" now correctly routes to `COMPLIANCE_HEAVY` (same as "I want to be compliant with GDPR"), even though the keywords differ. The router is local-only (FastEmbed encoder, no API key required).
+
+**Presidio note:** The assembled context passes through Presidio input guardrails before being sent to the LLM. Financial/contact PII is masked; person names and IPs are logged but not masked.

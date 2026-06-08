@@ -1,24 +1,41 @@
 # BRD Agent — Full Architecture & Flow Definition
 
-> **Version:** Simplified 3-State Flow (as of 2026-06-04)  
-> **Purpose:** Written reference of the complete BRD Agent workflow before making improvements.
+> **Version:** v2.0 — Production-Aligned (as of 2026-06-08)  
+> **Purpose:** Complete architecture specification for the BRD Agent, aligned to the [MDP Agent Chassis Framework v1.0](Team%20Docs/MDP_Agent_Chassis_Framework_Design_v1_0.txt).  
+> **Previous:** v1.0 was the pre-improvement 3-state baseline.
+
+### Chassis Plane Alignment
+
+| Chassis Plane | PoC Implementation | Production Target |
+|:---|:---|:---|
+| P1: Identity & Access | Request-scoped `session_id` | Managed Identity + OBO tokens |
+| P2: Orchestration & Routing | LangGraph + conditional edges + SqliteSaver | LangGraph + PostgresSaver |
+| P3: Memory & State | InMemoryStore (LangMem) + SqliteSaver (checkpointer) | PostgresStore + PostgresSaver |
+| P4: Tool Access (MCP) | Direct retriever calls (KG/VDB are not MCP per Chassis §3.3.1) | Same |
+| P5: Guardrails & Safety | Presidio (open-source) — input/output wrappers | Presidio + Azure AI Content Safety |
+| P6: LLM Gateway | Direct Azure OpenAI / Ollama client | APIM AI Gateway |
+| P7: Observability | OpenTelemetry + Phoenix + draft versioning | LangSmith + Event Hub + Databricks |
+| P8: Human-in-the-Loop | LangGraph `interrupt()` + Streamlit buttons | LangGraph interrupts + Agent Ops Portal |
 
 ---
 
 ## 1. System Overview
 
-The BRD Agent is a **3-state conversational system** that guides a user through eliciting business requirements and eventually emits a structured, schema-validated Business Requirements Document (BRD). It is built on **LangGraph** with two compiled graphs sharing state, LangMem memory extraction, RAG (vector + knowledge graph), and OpenTelemetry tracing.
+The BRD Agent is a **3-state conversational system** that guides a user through eliciting business requirements and eventually emits a structured, schema-validated Business Requirements Document (BRD). It is built on **LangGraph** with two compiled graphs sharing state, LangMem memory extraction, RAG (vector + knowledge graph), Presidio guardrails, and OpenTelemetry tracing.
 
 **Core Concepts:**
-- **Session:** A single BRD authoring thread, identified by `session_id` (maps to LangGraph `thread_id`).
+- **Session:** A single BRD authoring thread, identified by `session_id` (maps to LangGraph `thread_id`). Each request carries its own `session_id` — no global singleton.
 - **Three States:** The system operates in exactly three states that loop: **🟡 Agent Interaction** → **🟢 BRD Production** → **🔵 Review Mode** → (back to 🟡 if changes needed).
 - **Universal Agent Interaction:** 🟡 Agent Interaction is the **only entry point** for all user input — initial prompts, clarifications, and review changes all enter here.
 - **Atomic Production (per cycle):** 🟢 BRD Production is **atomic** — within a single production cycle, the document is produced or updated **all at once** with the complete gathered context. Nothing is emitted mid-gathering. The user may run **multiple production cycles** (initial generation, then updates after feedback) until satisfied.
 - **Feedback Re-entry is not a separate mode:** If the user wants changes in 🔵 Review Mode, the agent asks *"Any more reviews?"* and keeps looping inside 🟡 Agent Interaction (with the current draft in context) until the user says no. Then it reaches HITL 1 before production. The user may attach supporting documents with feedback, which are ingested through the same pipeline.
-- **State:** `ChatbotState` is the per-thread LangGraph state. All substantive data lives here; `SessionState` is only a thin approval flag.
-- **Graph:** Two LangGraph `StateGraph` instances share one `MemorySaver` checkpointer:
-  - **Agent Interaction Graph** — multi-turn conversation with memory extraction.
-  - **Drafting Graph** — single-shot structured BRD generation (or update).
+- **HITL Gates are LangGraph interrupts:** Both HITL 1 (pre-production) and HITL 2 (post-production review) are implemented as native LangGraph `interrupt()` calls, not ad-hoc branches. This is a hard constraint per Chassis §3.2.2.
+- **Guardrails:** Presidio input/output wrappers scan every LLM call for PII (Chassis §3.5). Financial identifiers (SSN, credit cards, bank numbers) and contact details (email, phone) are actively masked. Person names and IPs are logged but not masked (BRDs legitimately contain stakeholder names).
+- **State:** `ChatbotState` is the per-thread LangGraph state. All substantive data lives here (including `draft_status` and `rejection_count` — previously tracked as a thin session flag).
+- **Graph:** Two LangGraph `StateGraph` instances share one `SqliteSaver` checkpointer (production: `PostgresSaver`):
+  - **Agent Interaction Graph** — multi-turn conversation with memory extraction, uses **conditional edges** for routing.
+  - **Drafting Graph** — structured BRD generation with **validation retry loop**.
+- **Draft Versioning:** Every production cycle appends an immutable entry to `draft_history` with full provenance (prompt hash, context strategy, model, token accounting).
 
 ---
 
@@ -33,8 +50,22 @@ The BRD Agent is a **3-state conversational system** that guides a user through 
 | `reply_text` | `str` \| `None` | overwrite | Plain-text assistant reply from last turn (gathering only). |
 | `rolling_summary` | `dict` \| `None` | overwrite | `ConversationSummary` of trimmed older turns. |
 | `last_retrievals` | `dict` \| `None` | overwrite | Per-turn assembler output, caches, and `draft_raw`. |
-| `pending_feedback` | `list[str]` | add_items | **NEW:** Accumulates review feedback items while in 🟡 Agent Interaction before atomic production. |
-| `feedback_gathering` | `bool` | overwrite | **NEW:** Flag indicating we are in the "Any more reviews?" feedback collection loop. |
+| `pending_feedback` | `list[str]` | add_items | Accumulates review feedback items while in 🟡 Agent Interaction before atomic production. |
+| `feedback_gathering` | `bool` | overwrite | Flag indicating we are in the "Any more reviews?" feedback collection loop. |
+| `ready_for_production` | `bool` | overwrite | **NEW (v2):** Set by `invoke_llm` when sufficient detail is gathered. Drives the conditional edge to `hitl_gate`. |
+| `retry_count` | `int` | overwrite | **NEW (v2):** Tracks schema validation retries in the drafting graph. Max 2 retries. |
+| `validation_errors` | `list[str]` | overwrite | **NEW (v2):** Pydantic validation error details, fed back to LLM on retry. |
+| `draft_status` | `DraftStatus` | overwrite | **NEW (v2):** `draft` \| `approved` \| `rejected`. Replaces the old `session.approved` flag. |
+| `rejection_count` | `int` | overwrite | **NEW (v2):** Tracks how many times the user has rejected a draft. Logged for observability (no hard cap in PoC). |
+| `draft_history` | `list[dict]` | `add_items` | **NEW (v2):** Append-only list of draft snapshots with full provenance (version, prompt hash, strategy, model, token accounting, status). |
+
+**Enums:**
+```python
+class DraftStatus(str, Enum):
+    DRAFT = "draft"          # Just produced, awaiting review
+    APPROVED = "approved"    # Reviewer approved
+    REJECTED = "rejected"    # Reviewer rejected with feedback
+```
 
 **Key Memory Schemas:**
 - **BRDMemory** (extracted facts): title, background_notes, objectives, stakeholders, functional_requirements, non_functional_requirements, constraints, assumptions, risks, open_questions.
@@ -54,18 +85,19 @@ The BRD Agent is a **3-state conversational system** that guides a user through 
 - **Review re-entry:** When the user requests changes from 🔵 Review Mode, the agent re-enters 🟡 Agent Interaction with the current draft in context. It asks *"Any more reviews?"* and appends each feedback item to `pending_feedback`. The user may attach supporting documents (ingested through the same pipeline). The loop continues until the user says no — then the agent reaches HITL 1.
 
 **Flow:**
-1. **Endpoint** (`/chat`) receives `{message}`.
+1. **Endpoint** (`/chat`) receives `{message, session_id}`.
 2. **Mode decision:**
    - If `feedback_gathering == true` → continue feedback collection.
-   - If `current_draft` exists and is unapproved → switch to `request_changes` (enters feedback gathering loop).
+   - If `current_draft` exists and `draft_status != approved` → switch to `request_changes` (enters feedback gathering loop).
    - Else → `gathering`.
-3. **HumanMessage** appended to `state.messages`.
-4. **LangGraph thread invocation** on the **Agent Interaction Graph**.
-5. **Node 1: `summarize`**
+3. **Presidio Input Guardrail** (Chassis §3.5): Scan user message for PII. Mask financial/contact identifiers. Log person name detections.
+4. **HumanMessage** appended to `state.messages`.
+5. **LangGraph thread invocation** on the **Agent Interaction Graph**.
+6. **Node 1: `summarize`**
    - If `len(messages) > 12`: summarize oldest slice (everything except last 8) via LLM into `ConversationSummary`, merge with existing `rolling_summary`, emit `RemoveMessage` to drop old turns.
    - Else: no-op.
-6. **Node 2: `retrieve_context`**
-   - Infer `ContextStrategy` from `mode` + user message + `feedback_gathering` + draft existence.
+7. **Node 2: `retrieve_context`**
+   - Infer `ContextStrategy` from `mode` + user message + `feedback_gathering` + draft existence. (v2: semantic router replaces keyword matching for intent classification.)
    - `ContextAssembler.assemble()` builds the prompt stack:
      - System prompt (gathering, drafting, or request_changes variant)
      - Filtered `BRDMemory` block
@@ -76,35 +108,59 @@ The BRD Agent is a **3-state conversational system** that guides a user through 
      - **Draft + pending_feedback block** (if review re-entry)
      - Sliced conversation turns
    - Store assembled messages + token accounting in `state.last_retrievals["assembled"]`.
-7. **Node 3: `invoke_llm`**
+8. **Node 3: `invoke_llm`**
    - Read assembled messages, call LLM (`temperature=0.4`, `max_tokens=800`).
-   - If `feedback_gathering` and user says "no more reviews": set `feedback_gathering = false` and queue HITL 1 (present summary for user confirmation).
+   - **Presidio Output Guardrail:** Scan LLM reply for PII leakage before returning.
+   - If LLM judges sufficient detail gathered: set `ready_for_production = true`.
+   - If `feedback_gathering` and user says "no more reviews": set `feedback_gathering = false`, `ready_for_production = true`.
    - Append `AIMessage` to `state.messages`.
    - Store plain text in `state.reply_text`.
-8. **Node 4: `extract_memory`**
-   - Take last user + assistant exchange.
-   - Send to LangMem `MemoryStoreManager` (namespace `brd_agent/<session_id>`).
-   - Extract/update `BRDMemory` items.
-   - Read merged memory back into `state.brd_memory`.
-9. **Graph END.**
-10. **Response:** `{reply, mode, draft?, turn_id, ready_for_production?}`.
+9. **Conditional Edge: `route_after_conversation`** (v2 — replaces linear chain):
+   ```
+   if ready_for_production == true → hitl_gate
+   else → extract_memory (continue gathering)
+   ```
+10. **Node 4a (if routed): `hitl_gate`** (HITL 1 — LangGraph `interrupt()`)
+    - Build a summary of gathered requirements (or collected feedback).
+    - Call `interrupt({"type": "hitl_1", "summary": summary, "action_required": "confirm_or_add_more"})`.
+    - Graph **pauses**. Frontend shows summary + "Proceed" / "Add More" buttons.
+    - On resume: if user says "add more" → set `feedback_gathering = true`, continue gathering. If user confirms → proceed to production.
+11. **Node 4b (if routed): `extract_memory`**
+    - Take last user + assistant exchange.
+    - Send to LangMem `MemoryStoreManager` (namespace `brd_agent/<session_id>`).
+    - Extract/update `BRDMemory` items.
+    - Read merged memory back into `state.brd_memory`.
+12. **Graph END.**
+13. **Response:** `{reply, mode, draft?, turn_id, ready_for_production?}`.
+
+**Graph Topology (v2):**
+```
+START → summarize → retrieve_context → invoke_llm
+                                          │
+                             route_after_conversation
+                               ┌─────────┴─────────┐
+                               │                   │
+                         extract_memory         hitl_gate
+                               │               (interrupt)
+                              END
+```
 
 **Exit condition to 🟢 Production:**
-- For initial agent interaction: Agent decides "Sufficient detail gathered?" (LLM judgment or hard heuristic). If yes, the agent **pauses for HITL 1** — it presents a summary of gathered requirements to the user and asks for explicit confirmation before proceeding to production.
-- For feedback collection: User explicitly signals "no more reviews" while `feedback_gathering == true`. Then the agent presents a summary of all collected feedback and asks for HITL 1 confirmation before updating.
+- For initial agent interaction: Agent decides "Sufficient detail gathered?" (LLM judgment). If yes, the conditional edge routes to `hitl_gate`, which **pauses via `interrupt()`** and presents a summary for user confirmation.
+- For feedback collection: User explicitly signals "no more reviews" while `feedback_gathering == true`. The conditional edge routes to `hitl_gate` with a summary of all collected feedback.
 
 ---
 
 ### 🟢 State 2 — BRD PRODUCTION (atomic generate or update)
-**Trigger:** HITL 1 approval from 🟡 Agent Interaction. After the agent decides "Sufficient detail gathered? = Yes" (or feedback collection is complete), it presents a summary to the user. The user must explicitly confirm before the system transitions to Production.
+**Trigger:** HITL 1 approval from 🟡 Agent Interaction. After the `hitl_gate` node resumes with user confirmation, the system transitions to Production.
 
 **Preconditions:** Sufficient information in `brd_memory` + `messages` + `pending_feedback` (if re-entry).
 
 **Behavior:** Within a single production cycle, the BRD is produced or updated **atomically** (all at once) with the complete gathered context. No incremental emission. The user may run **multiple production cycles** until satisfied.
 
 **Flow:**
-1. **Endpoint** (`/generate-brd`) is called (either by user clicking "Generate BRD" or by auto-transition from feedback gathering).
-2. Set `mode = "drafting"`.
+1. **Endpoint** (`/generate-brd`) is called (either by user clicking "Generate BRD" or by auto-transition from HITL 1 approval).
+2. Set `mode = "drafting"`, `retry_count = 0`.
 3. **LangGraph thread invocation** on the **Drafting Graph** (no new `HumanMessage`).
 4. **Node 1: `retrieve_context`**
    - `infer_strategy()` returns `BRD_GENERATION` (or `BRD_UPDATE` if `current_draft` exists).
@@ -112,8 +168,10 @@ The BRD Agent is a **3-state conversational system** that guides a user through 
    - Includes full memory, all conversation turns, rolling summary, **and all accumulated `pending_feedback`**.
    - Heavy doc retrieval (4 hits) and KG retrieval (4 entities with 1-hop neighbours).
    - Instructs LLM to produce strict JSON matching `BRDResponse` schema.
+   - **If retrying:** also injects `validation_errors` from previous attempt so the LLM can self-correct.
    - Store in `state.last_retrievals["assembled"]`.
 5. **Node 2: `draft_llm`**
+   - **Presidio Input Guardrail:** Scan assembled context for PII before sending to LLM.
    - Read assembled messages.
    - Call LLM (`response_format={"type": "json_object"}`, `temperature=0.2`, `max_tokens=4000`).
    - Store raw JSON output in `state.last_retrievals["draft_raw"]`.
@@ -121,50 +179,94 @@ The BRD Agent is a **3-state conversational system** that guides a user through 
    - Extract JSON from raw (handles markdown fences, non-JSON wrappers).
    - Inject `drafted_by = "brd-agent@0.1.0"`.
    - Validate against `BRDResponse` Pydantic model.
-   - **Success:** Write validated dict to `state.current_draft`. Clear `pending_feedback`. Mark span OK.
-   - **Failure:** Mark span ERROR. Raise exception (graph halts; draft not saved).
-7. **Graph END.**
-8. **Auto-transition to 🔵 Review Mode.**
-9. **Response:** `{draft: BRDResponse, mode: "awaiting_approval"}`.
+   - **Presidio Output Guardrail:** Scan validated BRD for PII leakage.
+   - **Success:** Write validated dict to `state.current_draft`. Set `draft_status = DRAFT`. Clear `pending_feedback`, `validation_errors`. Append to `draft_history`. Mark span OK.
+   - **Failure:** Increment `retry_count`. Store error details in `validation_errors`. Mark span WARNING.
+7. **Conditional Edge: `route_after_validation`** (v2 — replaces linear chain):
+   ```
+   if current_draft is valid → END (success)
+   if retry_count < 2       → draft_llm (retry with error feedback)
+   else                     → error_handler (graceful degradation)
+   ```
+8. **On success:** Auto-transition to 🔵 Review Mode via `interrupt_after=["schema_validate"]` (HITL 2).
+9. **Response:** `{draft: BRDResponse, mode: "awaiting_approval", version: N}`.
+
+**Graph Topology (v2):**
+```
+START → retrieve_context → draft_llm → schema_validate
+                                            │
+                               route_after_validation
+                           ┌──────────┴─────────┐────────┐
+                           │                   │         │
+                          END              draft_llm  error_handler
+                       (success)           (retry)    (max retries)
+```
+
+**Draft History Entry (appended on each successful production):**
+```python
+{
+    "version": N,
+    "draft": brd.model_dump(mode="json"),
+    "produced_at": "2026-06-08T12:00:00Z",
+    "prompt_hash": "sha256:abc123...",
+    "context_strategy": "BRD_GENERATION",
+    "model": "gpt-4o",
+    "token_accounting": {...},
+    "status": "draft",
+    "reviewed_by": None,
+    "reviewed_at": None,
+}
+```
 
 ---
 
 ### 🔵 State 3 — REVIEW MODE (HITL 2)
-**Trigger:** Auto-transition from 🟢 Production after successful drafting.
+**Trigger:** Auto-transition from 🟢 Production after successful drafting (via `interrupt_after=["schema_validate"]`).
 
 **Behavior:** User reviews the delivered BRD. This is **HITL 2** — the user must actively decide whether to accept or request changes. Two paths:
 
 **Path A — Accept (HITL 2 = No Changes):**
 1. User clicks "Approve" → `POST /approve`.
-2. Endpoint marks `session.approved = True`.
-3. Response: `{status: "approved", brd_id}`.
-4. **END.**
+2. Endpoint sets `draft_status = APPROVED` in `ChatbotState` (v2: replaces `session.approved` flag).
+3. Updates the latest entry in `draft_history` with `reviewed_by` and `reviewed_at`.
+4. Response: `{status: "approved", brd_id, version}`.
+5. **END.**
 
 **Path B — Request Changes (HITL 2 = Changes Needed):**
 1. User enters feedback → `POST /request-changes` with `{feedback}`.
 2. Endpoint:
    - Appends feedback to `pending_feedback`.
    - Sets `feedback_gathering = true`.
+   - Sets `draft_status = REJECTED`, increments `rejection_count`.
    - Invokes **Agent Interaction Graph** with `mode="request_changes"`.
 3. `retrieve_context` infers `REFINEMENT` strategy + feedback gathering mode.
 4. Assembler injects `current_draft` + **all** `pending_feedback` into the prompt.
 5. `invoke_llm` acknowledges the feedback and asks *"Any more reviews?"*
 6. `extract_memory` updates `BRDMemory` with any new facts from the feedback.
-7. **Loop:** If user provides more feedback, it is appended to `pending_feedback` and step 2 repeats. If user says "no", `feedback_gathering` is cleared and the system reaches **HITL 1** (present summary, get confirmation before production).
-8. Response: `{reply, draft, mode}`.
+7. **Loop:** If user provides more feedback, it is appended to `pending_feedback` and step 2 repeats. If user says "no", the conditional edge routes to `hitl_gate` (HITL 1) with a summary of planned changes.
+8. Response: `{reply, draft, mode, feedback_gathering}`.
 
 ---
 
 ## 4. Node Reference
 
-| Node | Graph | Input State | Output State | External Calls |
-|---|---|---|---|---|
-| `summarize` | Agent Interaction | `messages` | `rolling_summary`, `messages` (with `RemoveMessage`) | LLM (summary generation) |
-| `retrieve_context` | Both | `mode`, `messages`, `brd_memory`, `rolling_summary`, `current_draft`, `last_retrievals`, `pending_feedback`, `feedback_gathering` | `last_retrievals["assembled"]` | Chroma, Neo4j, ArtifactStore |
-| `invoke_llm` | Agent Interaction | `last_retrievals["assembled"]` | `messages`, `reply_text` | LLM (chat completion) |
-| `extract_memory` | Agent Interaction | `messages` (last 2 turns) | `brd_memory` | LangMem MemoryStoreManager |
-| `draft_llm` | Drafting | `last_retrievals["assembled"]` | `last_retrievals["draft_raw"]` | LLM (JSON mode, 4k tokens) |
-| `schema_validate` | Drafting | `last_retrievals["draft_raw"]` | `current_draft`, clears `pending_feedback` | Pydantic validation |
+| Node | Graph | Input State | Output State | External Calls | Retry |
+|---|---|---|---|---|---|
+| `summarize` | Agent Interaction | `messages` | `rolling_summary`, `messages` (with `RemoveMessage`) | LLM (summary generation) | RetryPolicy(3) |
+| `retrieve_context` | Both | `mode`, `messages`, `brd_memory`, `rolling_summary`, `current_draft`, `last_retrievals`, `pending_feedback`, `feedback_gathering`, `validation_errors` | `last_retrievals["assembled"]` | Chroma, Neo4j, ArtifactStore | RetryPolicy(2) |
+| `invoke_llm` | Agent Interaction | `last_retrievals["assembled"]` | `messages`, `reply_text`, `ready_for_production` | LLM (chat completion) + Presidio (output scan) | RetryPolicy(3) |
+| `hitl_gate` | Agent Interaction | `brd_memory`, `pending_feedback` | `feedback_gathering`, `mode` | LangGraph `interrupt()` | — |
+| `extract_memory` | Agent Interaction | `messages` (last 2 turns) | `brd_memory` | LangMem MemoryStoreManager | — |
+| `draft_llm` | Drafting | `last_retrievals["assembled"]` | `last_retrievals["draft_raw"]` | Presidio (input scan) + LLM (JSON mode, 4k tokens) | RetryPolicy(3) |
+| `schema_validate` | Drafting | `last_retrievals["draft_raw"]` | `current_draft`, `draft_status`, `draft_history`, `retry_count`, `validation_errors`, clears `pending_feedback` | Pydantic validation + Presidio (output scan) | — |
+| `error_handler` | Drafting | `retry_count`, `validation_errors` | `reply_text` | — | — |
+
+**Conditional Edges (v2):**
+
+| Edge | After Node | Routing Function | Routes |
+|---|---|---|---|
+| `route_after_conversation` | `invoke_llm` | Inspects `ready_for_production` | `hitl_gate` \| `extract_memory` |
+| `route_after_validation` | `schema_validate` | Inspects `current_draft`, `retry_count` | `END` \| `draft_llm` (retry) \| `error_handler` |
 
 ---
 
@@ -182,10 +284,10 @@ The `ContextAssembler` decides what to include based on `ContextStrategy`:
 | `TEMPLATE_GUIDED` | 6 | Yes | Full | No | No | 2 | 2 + template |
 | `COMPLIANCE_HEAVY` | 6 | Yes | Full | No | No | 2 | 2 + regulatory |
 
-**Inference Priority:**
+**Inference Priority (v2 — cascading classification):**
 1. If `feedback_gathering == true` → `REFINEMENT` (or `BRD_UPDATE` if draft exists).
 2. Explicit `mode` override (`drafting` → `BRD_GENERATION`; `request_changes` → `REFINEMENT`).
-3. Keyword matching on user message ("template", "compliance", "clarify", etc.).
+3. **Semantic router** (v2): Embedding-based intent classification using example utterances per route. Replaces keyword matching. Uses `semantic-router` library with local FastEmbed encoder (no API key required).
 4. Default → `INFORMATION_GATHERING`.
 
 ---
@@ -217,15 +319,24 @@ User Message → Assistant Reply
    extract_memory node
        ↓
 LangMem MemoryStoreManager (namespace: brd_agent/<session_id>)
+  └── InMemoryStore (volatile — but see safety net below)
        ↓
    BRDMemory items (extracted facts)
        ↓
 Merged back into state.brd_memory
        ↓
-retrieve_context includes brd_memory in next prompt
+state.brd_memory persisted by SqliteSaver (checkpointer)
+       ↓
+retrieve_context reads brd_memory from checkpointed state
        ↓
 LLM uses accumulated facts to ask better questions / draft BRD
 ```
+
+**Persistence Safety Net (v2):**
+- LangMem uses `InMemoryStore` (no `SqliteStore` exists in LangGraph).
+- However, `state.brd_memory` is persisted by `SqliteSaver` via the checkpointer.
+- On process restart: InMemoryStore is empty, but `state.brd_memory` in the checkpoint has the last snapshot.
+- Next `extract_memory` call starts fresh in the store but the prompt still has all accumulated facts.
 
 **Feedback Gathering Extension:**
 ```
@@ -233,15 +344,15 @@ User Review Feedback → /request-changes
        ↓
    append to state.pending_feedback
        ↓
-   feedback_gathering = true
+   feedback_gathering = true, draft_status = REJECTED
        ↓
    invoke_llm asks "Any more reviews?"
        ↓
    Loop until user says "no"
        ↓
-   feedback_gathering = false
+   Conditional edge → hitl_gate (HITL 1 interrupt)
        ↓
-   Auto-transition to /generate-brd
+   User confirms → /generate-brd
        ↓
    retrieve_context includes ALL pending_feedback in prompt
        ↓
@@ -267,44 +378,63 @@ User Review Feedback → /request-changes
 | Endpoint | Method | Body | Response | Graph / Action |
 |---|---|---|---|---|
 | `/health` | GET | — | `{ok, agent_id, version}` | — |
-| `/chat` | POST | `{message}` | `{reply, mode, draft?, turn_id, ready_for_production?}` | Agent Interaction |
-| `/generate-brd` | POST | — | `{draft, mode}` | Drafting (atomic) |
-| `/approve` | POST | — | `{status, brd_id}` | Session flag |
-| `/request-changes` | POST | `{feedback}` | `{reply, draft, mode, feedback_gathering}` | Agent Interaction (feedback loop) |
+| `/chat` | POST | `{message, session_id?}` | `{reply, mode, draft?, turn_id, ready_for_production?, session_id}` | Agent Interaction |
+| `/generate-brd` | POST | `{session_id}` | `{draft, mode, version}` | Drafting (atomic) |
+| `/approve` | POST | `{session_id}` | `{status, brd_id, version}` | Set `draft_status = APPROVED` in state |
+| `/request-changes` | POST | `{feedback, session_id}` | `{reply, draft, mode, feedback_gathering}` | Agent Interaction (feedback loop) |
 | `/reset` | POST | — | `{status, session_id}` | New thread |
-| `/memory` | GET | — | `{session_id, memory}` | Read state / LangMem |
+| `/memory` | GET | `session_id` | `{session_id, memory}` | Read state / LangMem |
+| `/drafts` | GET | `session_id` | `{session_id, drafts: [{version, status, produced_at}]}` | Read `draft_history` from state |
+| `/drafts/{version}` | GET | `session_id` | `{draft, provenance}` | Read specific version from `draft_history` |
+| `/upload` | POST | `file, session_id` | `{job_id, status: "processing"}` | Background ingestion → Chroma |
 | `/tools/fetch-brd-template` | POST | `{template_name?}` | `{artifact_ref, available_templates, note}` | ArtifactStore + transcript |
 
 ---
 
-## 10. Key Design Rules (Simplified Flow)
+## 10. Key Design Rules
 
 1. **🟡 Agent Interaction is the universal entry point** — initial prompts, clarifications, and review changes all enter here.
 2. **🟢 Production is atomic** — BRD is produced/updated **once** per cycle with the complete gathered context. Multiple cycles are allowed (initial generation, then updates after feedback).
 3. **Feedback re-entry is not a separate mode** — it is the same Agent Interaction loop, entered with the current draft in context. The user may attach supporting documents with feedback (ingested through the same pipeline), and the loop ends at the same HITL 1 gate.
-4. **HITL 1 is the single per-cycle approval** — for both generation and updates. The agent cannot auto-jump to 🟢 Production; it must pause and present a summary (gathered requirements for a new BRD, or the concrete planned change to the current document for an update) and get explicit approval. The user either proceeds or adds more feedback. This prevents premature drafting.
+4. **HITL gates are LangGraph interrupts** (Chassis §3.2.2) — HITL 1 uses `interrupt()` inside `hitl_gate` node. HITL 2 uses `interrupt_after=["schema_validate"]`. No ad-hoc branches. The agent cannot auto-jump to 🟢 Production; it must pause and present a summary and get explicit approval.
 5. **🟢 → 🔵 is auto** — Once production starts, it completes and auto-delivers to Review Mode. No user action needed mid-production.
 6. **Only 🔵 → 🟡 requires user action** — Requesting changes from Review Mode (HITL 2) is the only backward transition triggered by the user.
-7. **The Knowledge Graph is a pre-seeded enterprise KB** — Ingestion populates the Vector DB only; the agent reads enterprise context (stakeholders, business units, regulatory domains, systems) from the KG but does not write to it. Enriching the KG from ingested documents is a future option, not part of the current flow.
+7. **The Knowledge Graph is a pre-seeded enterprise KB** — Ingestion populates the Vector DB only; the agent reads enterprise context from the KG but does not write to it. KG/VDB are direct retriever calls, not MCP (Chassis §3.3.1).
+8. **Presidio guardrails wrap every LLM call** (Chassis §3.5) — Input: scan user messages and assembled context. Output: scan LLM replies and generated BRD. Financial/contact PII is masked; person names are logged but not masked.
+9. **Every production cycle is versioned** — `draft_history` is append-only. Each entry captures the full provenance (prompt hash, strategy, model, token accounting) for audit trail.
+10. **Rejection count is tracked, no hard cap** — `rejection_count` increments on each `POST /request-changes`. Logged for observability. Production environment will enforce the Chassis §3.8 escalation rule (3 rejections).
+11. **Routing is via conditional edges, not implicit LLM logic** — `route_after_conversation` and `route_after_validation` are pure routing functions that inspect state. No side effects.
 
 ---
 
-## 11. Known Gaps / Improvement Areas (Pre-Change Baseline)
+## 11. Resolved & Remaining Gaps
 
-1. ~~**No human-in-the-loop gate before drafting:**~~ ✅ **ADDRESSED by HITL 1** — Agent now pauses after "Sufficient detail gathered?" and presents a summary for user confirmation before entering Production. Prevents premature drafting.
-2. **No conditional edges in graphs:** All graphs are linear chains. No branching on validation failure, no retry loops on schema errors.
-3. **Drafting graph does not use conversation memory extraction:** `draft_llm` and `schema_validate` are pure transform nodes; no memory is written during drafting.
-4. **Rolling summary is lossy:** Trimmed messages are gone forever (only summary remains). No way to "unroll" if needed.
-5. **Single-shot drafting:** No progressive / section-by-section draft generation. A 4k token limit could truncate complex BRDs.
-6. **Schema validation raises on failure:** The graph halts; the user gets an error, not a graceful degradation or auto-retry.
-7. **Context strategy inference is keyword-based:** No semantic classification; brittle to phrasing.
-8. **Approval is a session flag only:** No versioning of drafts (overwriting `current_draft` on re-generation loses previous version).
-9. **"Sufficient detail gathered?" is LLM-judged:** No hard requirements-coverage checklist before allowing transition to production.
+### ✅ Resolved in v2
+
+1. ~~**No human-in-the-loop gate before drafting:**~~ → HITL 1 via LangGraph `interrupt()` in `hitl_gate` node.
+2. ~~**No conditional edges in graphs:**~~ → `route_after_conversation` (gathering) and `route_after_validation` (drafting) replace linear chains.
+3. ~~**Schema validation raises on failure:**~~ → Validate-Repair-Retry loop with bounded retries (max 2) and error feedback to LLM.
+4. ~~**Context strategy inference is keyword-based:**~~ → Semantic router (embedding-based) replaces keyword matching.
+5. ~~**Approval is a session flag only:**~~ → `draft_status` in `ChatbotState` + `draft_history` with full provenance. No more `SessionState`.
+6. ~~**No guardrails/PII protection:**~~ → Presidio input/output wrappers on every LLM call (Chassis §3.5).
+7. ~~**Global singleton session:**~~ → Request-scoped `session_id` with `SqliteSaver` persistence.
+8. ~~**Volatile state (MemorySaver):**~~ → `SqliteSaver` checkpointer persists state across restarts.
+
+### ⚠️ Remaining (Acceptable for PoC)
+
+1. **Drafting graph does not use conversation memory extraction:** `draft_llm` and `schema_validate` are pure transform nodes; no memory is written during drafting.
+2. **Rolling summary is lossy:** Trimmed messages are gone forever (only summary remains). No way to "unroll" if needed.
+3. **Single-shot drafting:** No progressive / section-by-section draft generation. A 4k token limit could truncate complex BRDs.
+4. **"Sufficient detail gathered?" is LLM-judged:** No hard requirements-coverage checklist before allowing transition to production.
+5. **Memory dedup is naive:** Exact string match only. Two slightly different descriptions of the same stakeholder won't dedup.
+6. **No document ingestion pipeline yet:** `/upload` endpoint designed but not implemented. Text-based documents only (per SOW §7).
+7. **No cross-session learning:** Memory is session-scoped. No enterprise-level memory inheritance.
 
 ---
 
 ## Related Diagrams
 
+- [Simplified BRD Agent Flow](diagrams/simplified_brd_agent_flow.md) — High-level 3-state flow with HITL gates.
 - [Detailed Flow Diagram](diagrams/detailed_flow.md) — Data flow through every node and state field.
 - [State Flow Diagram](diagrams/state_flow.md) — Mode transitions and state machine (3-state simplified).
 - [Agent Interaction Graph Sequence](diagrams/gathering_graph.md) — Step-by-step node execution (includes feedback gathering loop).
