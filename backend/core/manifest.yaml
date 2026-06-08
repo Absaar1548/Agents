@@ -1,0 +1,25 @@
+agent_id: "brd-agent"
+version: "0.1.0"
+display_name: "Business Requirements Document Agent"
+domain: "requirements"
+capabilities:
+  - requirement_elicitation
+  - brd_generation
+  - brd_revision
+tools:
+  - chroma_vector_store
+  - neo4j_knowledge_graph
+  - fetch_brd_template
+prompts:
+  gathering: "brd-gathering@0.1.0"
+  drafting: "brd-drafting@0.1.0"
+  summarize: "brd-summarize@0.1.0"
+hitl_gates:
+  - hitl_1: "pre-production approval"
+  - hitl_2: "post-production review"
+reviewer_role: "Business Analyst / Product Owner"
+max_rejection_cycles: 3
+output_schema: "BRDResponse"
+llm_preference: "gpt-4o"
+guardrail_profile: "presidio-default"
+status: "active"

@@ -42,7 +42,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
 
-from backend.prompts import (
+from backend.context.prompts import (
     DRAFTING_PROMPT_HASH,
     DRAFTING_PROMPT_ID,
     DRAFTING_PROMPT_VERSION,
@@ -52,8 +52,8 @@ from backend.prompts import (
     GATHERING_PROMPT_VERSION,
     GATHERING_SYSTEM_PROMPT,
 )
+from backend.context.strategy import ContextStrategy
 from backend.sources.base import RetrievalSource, RetrievedDoc
-from backend.strategy import ContextStrategy
 from backend.telemetry import source_span
 
 

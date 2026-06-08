@@ -19,9 +19,9 @@ if sys.platform == "win32":
 from backend.telemetry import flush_telemetry, init_telemetry  # noqa: E402
 from backend.llm import create_llm_client  # noqa: E402
 from backend.memory import build_memory_manager, read_memory  # noqa: E402
-from backend.context_assembler import ContextAssembler  # noqa: E402
+from backend.context.assembler import ContextAssembler  # noqa: E402
 from backend.artifacts import ArtifactStore  # noqa: E402
-from backend.graph import AgentRuntime, build_gathering_graph  # noqa: E402
+from backend.core.graph import AgentRuntime, build_gathering_graph  # noqa: E402
 from backend.sources.vector_store import ChromaRetrievalSource  # noqa: E402
 from backend.sources.kg import Neo4jKGSource  # noqa: E402
 from langchain_core.messages import HumanMessage  # noqa: E402

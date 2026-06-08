@@ -26,8 +26,9 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
-from backend.graph import AgentRuntime, ChatbotState
-from backend.strategy import infer_strategy
+from backend.core.graph import AgentRuntime
+from backend.core.state import ChatbotState
+from backend.context.strategy import infer_strategy
 from backend.telemetry import KIND_CHAIN, add_memory_event, chat_span
 
 

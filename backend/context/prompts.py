@@ -63,7 +63,7 @@ Allowed enum values:
 | "usability" | "compliance" | "maintainability"
 
 If the conversation is thin on a section, make reasonable assumptions and list \
-them in `assumptions`. Every functional requirement MUST have at least one \
+them in `assumptions`. Every functional requirement MUST have at least one
 acceptance criterion.
 
 Return ONLY the JSON object. No preamble, no markdown fences, no commentary.\

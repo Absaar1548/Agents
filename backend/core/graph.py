@@ -23,35 +23,15 @@ Phase 6 to avoid duplicate span tree clutter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Optional, TypedDict
+from typing import Any, Optional
 
-from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
 
 from backend.artifacts import ArtifactStore
-from backend.context_assembler import ContextAssembler
+from backend.context.assembler import ContextAssembler
+from backend.core.state import ChatbotState
 from backend.llm import BaseLLMClient
-
-
-ChatMode = Literal["gathering", "drafting", "request_changes"]
-
-
-class ChatbotState(TypedDict, total=False):
-    """Per-thread state persisted by the checkpointer.
-
-    `messages` uses LangGraph's `add_messages` reducer so HumanMessage /
-    AIMessage / RemoveMessage updates compose correctly across nodes.
-    """
-
-    messages: Annotated[list[BaseMessage], add_messages]
-    mode: ChatMode
-    brd_memory: Optional[dict]       # latest BRDMemory dict
-    current_draft: Optional[dict]    # BRDResponse JSON dump (gets set by drafting)
-    reply_text: Optional[str]        # plain-text assistant reply (gathering / request_changes)
-    rolling_summary: Optional[dict]  # ConversationSummary dump (populated by summarize node)
-    last_retrievals: Optional[dict]  # per-turn assembler output + doc/kg/artifact caches
 
 
 @dataclass

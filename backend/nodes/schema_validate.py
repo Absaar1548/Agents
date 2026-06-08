@@ -14,8 +14,9 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
-from backend.graph import AgentRuntime, ChatbotState
-from backend.schema import BRDResponse
+from backend.core.graph import AgentRuntime
+from backend.core.state import ChatbotState
+from backend.core.schema import BRDResponse
 from backend.telemetry import KIND_TOOL, chat_span
 
 DRAFTED_BY = "brd-agent@0.1.0"

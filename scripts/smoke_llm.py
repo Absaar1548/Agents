@@ -15,7 +15,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from backend.telemetry import chat_span, flush_telemetry, init_telemetry  # noqa: E402
 from backend.llm import create_llm_client  # noqa: E402
-from backend.schema import (  # noqa: E402
+from backend.core.schema import (  # noqa: E402
     BRDResponse,
     FunctionalRequirement,
     NFRCategory,

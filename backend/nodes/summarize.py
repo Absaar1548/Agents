@@ -22,8 +22,9 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, Remove
 from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
-from backend.graph import AgentRuntime, ChatbotState
-from backend.prompts import (
+from backend.core.graph import AgentRuntime
+from backend.core.state import ChatbotState
+from backend.context.prompts import (
     SUMMARIZE_PROMPT_HASH,
     SUMMARIZE_PROMPT_ID,
     SUMMARIZE_PROMPT_VERSION,

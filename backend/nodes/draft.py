@@ -14,7 +14,8 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
-from backend.graph import AgentRuntime, ChatbotState
+from backend.core.graph import AgentRuntime
+from backend.core.state import ChatbotState
 from backend.telemetry import KIND_CHAIN, chat_span
 
 def draft_llm(

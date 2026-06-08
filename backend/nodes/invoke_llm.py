@@ -12,7 +12,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
-from backend.graph import AgentRuntime, ChatbotState
+from backend.core.graph import AgentRuntime
+from backend.core.state import ChatbotState
 from backend.telemetry import KIND_CHAIN, chat_span
 
 def invoke_llm(
