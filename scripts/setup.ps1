@@ -73,6 +73,12 @@ if (-not $SkipInstall) {
     Write-Step "installing Python dependencies"
     Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip")
     Invoke-Checked $VenvPython @("-m", "pip", "install", "-r", "requirements.txt")
+
+    Write-Step "downloading spaCy model for Presidio PERSON detection (optional)"
+    & $VenvPython @("-m", "spacy", "download", "en_core_web_sm")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "spaCy model download failed; Presidio will fall back to regex-only recognizers."
+    }
 }
 
 if ($SeedChroma) {

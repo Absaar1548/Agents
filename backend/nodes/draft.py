@@ -16,6 +16,7 @@ from opentelemetry.trace import SpanKind
 
 from backend.core.graph import AgentRuntime
 from backend.core.state import ChatbotState
+from backend.guardrails.presidio import _mask_messages
 from backend.telemetry import KIND_CHAIN, chat_span
 
 def draft_llm(
@@ -45,6 +46,15 @@ def draft_llm(
         span.set_attribute("llm.response_format", "json_object")
         span.set_attribute("llm.max_tokens", 4000)
         span.set_attribute("messages.count", len(messages))
+
+        # Point 3: scan assembled drafting messages before sending to LLM
+        messages, input_masked, input_logged = _mask_messages(
+            messages,
+            session_id=session_id,
+            scan_name="guardrails.draft_llm.input",
+        )
+        span.set_attribute("guardrail.input.masked_count", len(input_masked))
+        span.set_attribute("guardrail.input.logged_count", len(input_logged))
 
         raw = runtime.llm.complete(
             messages=messages,

@@ -14,6 +14,7 @@ from opentelemetry.trace import SpanKind
 
 from backend.core.graph import AgentRuntime
 from backend.core.state import ChatbotState
+from backend.guardrails.presidio import _mask_messages, scan_and_protect
 from backend.telemetry import KIND_CHAIN, chat_span
 
 READY_MARKER = "[READY_FOR_PRODUCTION]"
@@ -50,13 +51,31 @@ def invoke_llm(
         span.set_attribute("llm.max_tokens", 800)
         span.set_attribute("messages.count", len(messages))
 
+        # Point 1: scan assembled messages before sending to LLM
+        messages, input_masked, input_logged = _mask_messages(
+            messages,
+            session_id=session_id,
+            scan_name="guardrails.invoke_llm.input",
+        )
+        span.set_attribute("guardrail.input.masked_count", len(input_masked))
+        span.set_attribute("guardrail.input.logged_count", len(input_logged))
+
         reply = runtime.llm.complete(
             messages=messages, temperature=0.4, max_tokens=800
         )
 
+        # Point 2: scan reply before returning to user
+        clean_reply, output_masked, output_logged = scan_and_protect(
+            reply,
+            session_id=session_id,
+            scan_name="guardrails.invoke_llm.output",
+        )
+        span.set_attribute("guardrail.output.masked_count", len(output_masked))
+        span.set_attribute("guardrail.output.logged_count", len(output_logged))
+
         # Phase 2: detect readiness marker
-        ready = READY_MARKER in reply
-        clean_reply = reply.replace(READY_MARKER, "").strip()
+        ready = READY_MARKER in clean_reply
+        clean_reply = clean_reply.replace(READY_MARKER, "").strip()
         if ready:
             span.set_attribute("hitl.ready_for_production", True)
 

@@ -16,6 +16,7 @@ from opentelemetry.trace import SpanKind
 from backend.core.graph import AgentRuntime
 from backend.core.schema import BRDResponse
 from backend.core.state import ChatbotState, DraftStatus
+from backend.guardrails.presidio import scan_dict_strings
 from backend.telemetry import KIND_TOOL, chat_span
 
 DRAFTED_BY = "brd-agent@0.1.0"
@@ -73,9 +74,18 @@ def schema_validate(
             span.set_attribute("schema.nfr_count", len(brd.non_functional_requirements))
             span.set_attribute("schema.risk_count", len(brd.risks))
 
-            # Success — return current_draft and reset retry counters
+            # Point 4: scan generated BRD before it reaches user / reviewer
+            cleaned_draft, masked, logged = scan_dict_strings(
+                brd.model_dump(mode="json"),
+                session_id=session_id,
+                scan_name="guardrails.schema_validate.output",
+            )
+            span.set_attribute("guardrail.output.masked_count", len(masked))
+            span.set_attribute("guardrail.output.logged_count", len(logged))
+
+            # Success — return cleaned current_draft and reset retry counters
             return {
-                "current_draft": brd.model_dump(mode="json"),
+                "current_draft": cleaned_draft,
                 "draft_status": DraftStatus.DRAFT,
                 "retry_count": 0,
                 "validation_errors": [],

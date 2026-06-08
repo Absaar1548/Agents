@@ -29,6 +29,11 @@ opentelemetry-exporter-otlp-proto-http>=1.27
 openinference-instrumentation-openai>=0.1.18
 arize-phoenix>=5.0
 
+# Guardrails (Phase 3)
+presidio-analyzer>=2.2
+presidio-anonymizer>=2.2
+spacy>=3.7               # optional; required for PERSON detection
+
 # Frontend
 streamlit>=1.40
 httpx>=0.27
