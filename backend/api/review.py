@@ -1,18 +1,20 @@
 """Review endpoints.
 
-  POST /approve           {}             → { status, brd_id }
-  POST /request-changes   { feedback }   → { reply, draft, mode }
+  POST /approve           { session_id }             → { status, brd_id }
+  POST /request-changes   { feedback, session_id }   → { reply, draft, mode }
 """
 from __future__ import annotations
+
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
 
-from backend.api.deps import _config, _current_draft
+from backend.api.deps import _config, _current_draft, _read_graph_state
 from backend.core.schema import BRDResponse
-from backend.session import get_session
+from backend.core.state import DraftStatus
 from backend.telemetry import (
     KIND_AGENT,
     KIND_CHAIN,
@@ -25,6 +27,10 @@ from backend.telemetry import (
 router = APIRouter()
 
 
+class ApproveRequest(BaseModel):
+    session_id: str = Field(...)
+
+
 class ApproveResponse(BaseModel):
     status: str
     brd_id: str
@@ -32,6 +38,7 @@ class ApproveResponse(BaseModel):
 
 class RequestChangesBody(BaseModel):
     feedback: str = Field(min_length=1)
+    session_id: str = Field(...)
 
 
 class RequestChangesResponse(BaseModel):
@@ -41,15 +48,20 @@ class RequestChangesResponse(BaseModel):
 
 
 @router.post("/approve", response_model=ApproveResponse)
-def approve(request: Request) -> ApproveResponse:
-    session = get_session()
-    draft = _current_draft(request, session.session_id)
+def approve(body: ApproveRequest, request: Request) -> ApproveResponse:
+    draft = _current_draft(request, body.session_id)
     if draft is None:
         raise HTTPException(status_code=400, detail="No draft to approve.")
     brd_id = str(draft.brd_id)
+
+    # Persist approval into graph state
+    graph = request.app.state.gathering_graph
+    config = _config(body.session_id)
+    graph.update_state(config, {"draft_status": DraftStatus.APPROVED})
+
     with chat_span(
         "brd_agent.approve",
-        session_id=session.session_id,
+        session_id=body.session_id,
         span_kind=KIND_CHAIN,
         otel_kind=SpanKind.SERVER,
         chat_mode="approve",
@@ -59,7 +71,6 @@ def approve(request: Request) -> ApproveResponse:
         set_input(span, {"brd_id": brd_id}, mime="application/json")
         span.set_attribute("brd.id", brd_id)
         span.set_attribute("approval.outcome", "approved")
-        session.approved = True
         set_output(
             span, {"status": "approved", "brd_id": brd_id}, mime="application/json"
         )
@@ -69,16 +80,24 @@ def approve(request: Request) -> ApproveResponse:
 
 @router.post("/request-changes", response_model=RequestChangesResponse)
 def request_changes(body: RequestChangesBody, request: Request) -> RequestChangesResponse:
-    session = get_session()
-    draft = _current_draft(request, session.session_id)
+    draft = _current_draft(request, body.session_id)
     if draft is None:
         raise HTTPException(status_code=400, detail="No draft to revise.")
 
     graph = request.app.state.gathering_graph
 
+    # Mark as rejected + increment rejection_count
+    config = _config(body.session_id)
+    state = _read_graph_state(request, body.session_id)
+    rejection_count = state.get("rejection_count", 0) + 1
+    graph.update_state(config, {
+        "draft_status": DraftStatus.REJECTED,
+        "rejection_count": rejection_count,
+    })
+
     with chat_span(
         "brd_agent.request_changes",
-        session_id=session.session_id,
+        session_id=body.session_id,
         span_kind=KIND_AGENT,
         otel_kind=SpanKind.SERVER,
         chat_mode="request_changes",
@@ -94,7 +113,7 @@ def request_changes(body: RequestChangesBody, request: Request) -> RequestChange
                 "messages": [HumanMessage(content=body.feedback)],
                 "mode": "request_changes",
             },
-            config=_config(session.session_id),
+            config=_config(body.session_id),
         )
         reply = result.get("reply_text", "")
 

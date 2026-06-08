@@ -1,15 +1,16 @@
 """Chat, reset, memory inspection, and tool endpoints.
 
-  POST /chat              { message }    → { reply, mode, draft?, turn_id }
-  POST /reset             {}             → { status, session_id }
-  GET  /memory                           → { session_id, memory }
-  POST /tools/fetch-brd-template { template_name } → { artifact_ref, available_templates, note }
+  POST /chat              { message, session_id }    → { reply, mode, draft?, turn_id }
+  POST /reset             { session_id }             → { status, session_id }
+  GET  /memory            ?session_id={sid}          → { session_id, memory }
+  POST /tools/fetch-brd-template { template_name, session_id } → { artifact_ref, available_templates, note }
 """
 from __future__ import annotations
 
+import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
@@ -17,8 +18,8 @@ from pydantic import BaseModel, Field
 from backend.api.deps import _config, _current_draft, _read_graph_state, _turn_id
 from backend.artifacts import ArtifactRef
 from backend.core.schema import BRDResponse
+from backend.core.state import DraftStatus
 from backend.memory import read_memory
-from backend.session import get_session, reset_session
 from backend.telemetry import (
     KIND_AGENT,
     KIND_CHAIN,
@@ -36,6 +37,7 @@ router = APIRouter()
 # ----- request / response models -----
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
+    session_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class ChatResponse(BaseModel):
@@ -43,6 +45,10 @@ class ChatResponse(BaseModel):
     mode: str
     draft: Optional[BRDResponse] = None
     turn_id: int
+
+
+class ResetRequest(BaseModel):
+    session_id: str = Field(...)
 
 
 class ResetResponse(BaseModel):
@@ -57,6 +63,7 @@ class MemoryResponse(BaseModel):
 
 class FetchTemplateBody(BaseModel):
     template_name: Optional[str] = None
+    session_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class FetchTemplateResponse(BaseModel):
@@ -68,13 +75,14 @@ class FetchTemplateResponse(BaseModel):
 # ----- endpoints -----
 @router.post("/chat", response_model=ChatResponse)
 def chat(body: ChatRequest, request: Request) -> ChatResponse:
-    session = get_session()
-    existing_draft = _current_draft(request, session.session_id)
+    state = _read_graph_state(request, body.session_id)
+    existing_draft = _current_draft(request, body.session_id)
+    draft_status = state.get("draft_status")
     graph = request.app.state.gathering_graph
 
     # If a draft is awaiting approval and the user sends plain chat, treat
     # the message as a change request so the draft is injected into the prompt.
-    if existing_draft is not None and not session.approved:
+    if existing_draft is not None and draft_status != DraftStatus.APPROVED:
         mode = "request_changes"
         root_name = "brd_agent.request_changes"
         tags = ["request_changes"]
@@ -85,7 +93,7 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
     with chat_span(
         root_name,
-        session_id=session.session_id,
+        session_id=body.session_id,
         span_kind=KIND_AGENT,
         otel_kind=SpanKind.SERVER,
         chat_mode=mode,
@@ -98,12 +106,12 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
         result = graph.invoke(
             {"messages": [HumanMessage(content=body.message)], "mode": mode},
-            config=_config(session.session_id),
+            config=_config(body.session_id),
         )
 
         reply = result.get("reply_text", "")
-        draft = _current_draft(request, session.session_id)
-        turn_id = _turn_id(request, session.session_id)
+        draft = _current_draft(request, body.session_id)
+        turn_id = _turn_id(request, body.session_id)
 
         set_output(root, reply)
         set_outcome(root, "success")
@@ -112,11 +120,20 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
 
 @router.post("/reset", response_model=ResetResponse)
-def reset(request: Request) -> ResetResponse:
-    session = reset_session()  # rotates session_id → new thread_id → empty state
+def reset(body: ResetRequest, request: Request) -> ResetResponse:
+    # Optionally purge old checkpoints (best-effort; SqliteSaver may not expose delete)
+    config = _config(body.session_id)
+    try:
+        cp = request.app.state.gathering_graph.checkpointer
+        if hasattr(cp, "delete"):
+            cp.delete(config)
+    except Exception:
+        pass  # thread may not exist yet or delete not supported
+
+    new_session_id = uuid.uuid4().hex
     with chat_span(
         "brd_agent.reset",
-        session_id=session.session_id,
+        session_id=new_session_id,
         span_kind=KIND_CHAIN,
         otel_kind=SpanKind.SERVER,
         chat_mode="reset",
@@ -126,23 +143,24 @@ def reset(request: Request) -> ResetResponse:
         set_input(span, "(reset)")
         set_output(
             span,
-            {"status": "ok", "session_id": session.session_id},
+            {"status": "ok", "session_id": new_session_id},
             mime="application/json",
         )
         set_outcome(span, "reset")
-    return ResetResponse(status="ok", session_id=session.session_id)
+    return ResetResponse(status="ok", session_id=new_session_id)
 
 
 @router.get("/memory", response_model=MemoryResponse)
-def memory_inspect(request: Request) -> MemoryResponse:
-    session = get_session()
-    state = _read_graph_state(request, session.session_id)
+def memory_inspect(
+    request: Request, session_id: str = Query(...)
+) -> MemoryResponse:
+    state = _read_graph_state(request, session_id)
     mem = state.get("brd_memory")
     # Fallback: read directly from the LangMem store if state is empty
     if mem is None:
         runtime = request.app.state.runtime
-        mem = read_memory(runtime.store, session.session_id)
-    return MemoryResponse(session_id=session.session_id, memory=mem)
+        mem = read_memory(runtime.store, session_id)
+    return MemoryResponse(session_id=session_id, memory=mem)
 
 
 @router.post("/tools/fetch-brd-template", response_model=FetchTemplateResponse)
@@ -156,13 +174,12 @@ def fetch_template(body: FetchTemplateBody, request: Request) -> FetchTemplateRe
     so the user-visible chat reflects what was fetched. The full content
     never enters the buffer — only the summary surfaces.
     """
-    session = get_session()
     runtime = request.app.state.runtime
     graph = request.app.state.gathering_graph
 
     with chat_span(
         "tool.fetch_brd_template",
-        session_id=session.session_id,
+        session_id=body.session_id,
         span_kind=KIND_TOOL,
         otel_kind=SpanKind.SERVER,
         chat_mode="tool_call",
@@ -186,8 +203,8 @@ def fetch_template(body: FetchTemplateBody, request: Request) -> FetchTemplateRe
         # `last_retrievals` dict (full overwrite of that field — assembler
         # nodes also write to last_retrievals, but they always read first
         # and merge, see retrieve_context).
-        config = _config(session.session_id)
-        current = _read_graph_state(request, session.session_id).get("last_retrievals") or {}
+        config = _config(body.session_id)
+        current = _read_graph_state(request, body.session_id).get("last_retrievals") or {}
         existing_refs = current.get("artifact_refs") or []
         condensed = (
             f"📎 Fetched **{ref.name}** "

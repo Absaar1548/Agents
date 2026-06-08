@@ -6,14 +6,18 @@ Lifespan builds the runtime, sources, graphs, and stores them on
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 # Load .env BEFORE telemetry/openai imports inside backend modules.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# Ensure persistent storage directory exists before SqliteSaver is imported.
+Path("storage").mkdir(exist_ok=True)
 
 from backend.api.chat import router as chat_router
 from backend.api.drafting import router as drafting_router
@@ -75,16 +79,21 @@ async def lifespan(app: FastAPI):
         assembler=assembler,
         artifact_store=artifact_store,
     )
-    gathering_graph = build_gathering_graph(runtime)
-    drafting_graph = build_drafting_graph(runtime)
 
-    app.state.runtime = runtime
-    app.state.gathering_graph = gathering_graph
-    app.state.drafting_graph = drafting_graph
-    app.state.store = store
+    async with AsyncExitStack() as stack:
+        checkpointer = stack.enter_context(
+            SqliteSaver.from_conn_string("storage/checkpoints.db")
+        )
+        gathering_graph = build_gathering_graph(runtime, checkpointer)
+        drafting_graph = build_drafting_graph(runtime, checkpointer)
 
-    yield
-    flush_telemetry()
+        app.state.runtime = runtime
+        app.state.gathering_graph = gathering_graph
+        app.state.drafting_graph = drafting_graph
+        app.state.store = store
+
+        yield
+        flush_telemetry()
 
 
 # ----- app -----

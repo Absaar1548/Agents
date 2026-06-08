@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 
 import httpx
 import streamlit as st
@@ -27,37 +28,40 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=BACKEND_URL, timeout=120.0)
 
 
-def api_chat(message: str) -> dict:
+def api_chat(message: str, session_id: str) -> dict:
     with _client() as c:
-        r = c.post("/chat", json={"message": message})
+        r = c.post("/chat", json={"message": message, "session_id": session_id})
         r.raise_for_status()
         return r.json()
 
 
-def api_generate() -> dict:
+def api_generate(session_id: str) -> dict:
     with _client() as c:
-        r = c.post("/generate-brd")
+        r = c.post("/generate-brd", json={"session_id": session_id})
         r.raise_for_status()
         return r.json()
 
 
-def api_approve() -> dict:
+def api_approve(session_id: str) -> dict:
     with _client() as c:
-        r = c.post("/approve")
+        r = c.post("/approve", json={"session_id": session_id})
         r.raise_for_status()
         return r.json()
 
 
-def api_request_changes(feedback: str) -> dict:
+def api_request_changes(feedback: str, session_id: str) -> dict:
     with _client() as c:
-        r = c.post("/request-changes", json={"feedback": feedback})
+        r = c.post(
+            "/request-changes",
+            json={"feedback": feedback, "session_id": session_id},
+        )
         r.raise_for_status()
         return r.json()
 
 
-def api_reset() -> dict:
+def api_reset(session_id: str) -> dict:
     with _client() as c:
-        r = c.post("/reset")
+        r = c.post("/reset", json={"session_id": session_id})
         r.raise_for_status()
         return r.json()
 
@@ -77,6 +81,8 @@ def init_state() -> None:
         st.session_state.current_draft = None
     if "approved_brd_id" not in st.session_state:
         st.session_state.approved_brd_id = None
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = uuid.uuid4().hex
 
 
 init_state()
@@ -89,7 +95,8 @@ st.caption(f"Backend: `{BACKEND_URL}` · Traces in Phoenix: http://localhost:600
 col_reset, col_health = st.columns([1, 5])
 with col_reset:
     if st.button("Reset session", use_container_width=True):
-        api_reset()
+        res = api_reset(st.session_state.session_id)
+        st.session_state.session_id = res["session_id"]
         st.session_state.messages = []
         st.session_state.current_draft = None
         st.session_state.approved_brd_id = None
@@ -131,7 +138,7 @@ if st.session_state.current_draft and not st.session_state.approved_brd_id:
     col_approve, col_changes = st.columns([1, 3])
     with col_approve:
         if st.button("✅ Approve", type="primary", use_container_width=True):
-            res = api_approve()
+            res = api_approve(st.session_state.session_id)
             st.session_state.approved_brd_id = res["brd_id"]
             st.session_state.messages.append(
                 {
@@ -149,7 +156,9 @@ if st.session_state.current_draft and not st.session_state.approved_brd_id:
             )
             submitted = st.form_submit_button("Request changes")
             if submitted and feedback.strip():
-                res = api_request_changes(feedback.strip())
+                res = api_request_changes(
+                    feedback.strip(), st.session_state.session_id
+                )
                 st.session_state.messages.append(
                     {"role": "user", "content": f"_Requested changes:_ {feedback}"}
                 )
@@ -161,10 +170,12 @@ if st.session_state.current_draft and not st.session_state.approved_brd_id:
 
 
 # ----- Generate BRD button (when in gathering and no current draft awaiting) -----
-if (not st.session_state.current_draft or st.session_state.approved_brd_id) and not st.session_state.approved_brd_id:
+if (
+    not st.session_state.current_draft or st.session_state.approved_brd_id
+) and not st.session_state.approved_brd_id:
     st.divider()
     if st.button("🪄 Generate BRD", use_container_width=True):
-        res = api_generate()
+        res = api_generate(st.session_state.session_id)
         draft = res["draft"]
         st.session_state.current_draft = draft
         st.session_state.messages.append(
@@ -178,8 +189,10 @@ if (not st.session_state.current_draft or st.session_state.approved_brd_id) and 
 elif st.session_state.current_draft and not st.session_state.approved_brd_id:
     # Already have an awaiting-approval draft — offer a "regenerate" option
     # that overwrites the current draft.
-    if st.button("🔄 Regenerate BRD (replaces draft above)", use_container_width=True):
-        res = api_generate()
+    if st.button(
+        "🔄 Regenerate BRD (replaces draft above)", use_container_width=True
+    ):
+        res = api_generate(st.session_state.session_id)
         draft = res["draft"]
         st.session_state.current_draft = draft
         st.session_state.messages.append(
@@ -204,7 +217,7 @@ if user_input := st.chat_input(
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                res = api_chat(user_input)
+                res = api_chat(user_input, st.session_state.session_id)
                 reply = res["reply"]
                 st.markdown(reply)
                 st.session_state.messages.append(

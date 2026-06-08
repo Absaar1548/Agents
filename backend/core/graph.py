@@ -1,7 +1,7 @@
 """LangGraph definition for the BRD agent.
 
-ChatbotState is the per-thread state persisted by the in-memory
-MemorySaver checkpointer. main.py invokes one of two compiled graphs per
+ChatbotState is the per-thread state persisted by the SqliteSaver
+checkpointer. main.py invokes one of two compiled graphs per
 endpoint:
 
   gathering_graph  →  POST /chat, POST /request-changes
@@ -25,7 +25,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from backend.artifacts import ArtifactStore
@@ -49,11 +48,6 @@ class AgentRuntime:
     artifact_store: ArtifactStore  # large tool outputs live here (Phase 5)
 
 
-# Single in-process checkpointer shared by both graphs. Production swap:
-# SqliteSaver or PostgresSaver — same interface, persistent storage.
-checkpointer = MemorySaver()
-
-
 def _bind(fn, runtime: AgentRuntime):
     """Bind `runtime` into a node fn while keeping the LangGraph-canonical
     `(state, config)` signature so LangGraph's introspection injects the
@@ -66,7 +60,7 @@ def _bind(fn, runtime: AgentRuntime):
     return node
 
 
-def build_gathering_graph(runtime: AgentRuntime):
+def build_gathering_graph(runtime: AgentRuntime, checkpointer):
     """gathering_graph: handles POST /chat and POST /request-changes.
 
     `state.mode` distinguishes which prompt set + assembler strategy each
@@ -90,7 +84,7 @@ def build_gathering_graph(runtime: AgentRuntime):
     return g.compile(checkpointer=checkpointer)
 
 
-def build_drafting_graph(runtime: AgentRuntime):
+def build_drafting_graph(runtime: AgentRuntime, checkpointer):
     """drafting_graph: handles POST /generate-brd.
 
     Reads existing thread state (messages + brd_memory) and produces a
