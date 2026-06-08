@@ -1,6 +1,7 @@
 """schema_validate node — parses draft JSON and validates against BRDResponse.
 
-On success: writes the BRDResponse dump into state.current_draft.
+On success: writes the BRDResponse dump into state.current_draft and appends a
+provenance entry to state.draft_history.
 On failure: sets retry_count + validation_errors so the drafting graph can
 loop back to draft_llm (max 2 retries) before routing to error_handler.
 """
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -83,12 +85,37 @@ def schema_validate(
             span.set_attribute("guardrail.output.masked_count", len(masked))
             span.set_attribute("guardrail.output.logged_count", len(logged))
 
-            # Success — return cleaned current_draft and reset retry counters
+            # Build provenance entry and append to draft_history
+            assembled = (state.get("last_retrievals") or {}).get("assembled") or {}
+            history = list(state.get("draft_history") or [])
+            version = len(history) + 1
+            entry = {
+                "version": version,
+                "draft": cleaned_draft,
+                "produced_at": datetime.now(timezone.utc).isoformat(),
+                "prompt_id": assembled.get("prompt_id", ""),
+                "prompt_version": assembled.get("prompt_version", ""),
+                "prompt_hash": f"sha256:{assembled.get('prompt_template_hash', '')}",
+                "context_strategy": assembled.get("strategy", "BRD_GENERATION"),
+                "model": runtime.llm.model,
+                "provider": runtime.llm.provider,
+                "token_accounting": assembled.get("token_accounting", {}),
+                "status": "draft",
+                "reviewed_by": None,
+                "reviewed_at": None,
+            }
+            history.append(entry)
+            span.set_attribute("draft.version", version)
+            span.set_attribute("draft.history_count", len(history))
+            span.set_attribute("draft.produced_at", entry["produced_at"])
+
+            # Success — return cleaned current_draft, reset retry counters, and history
             return {
                 "current_draft": cleaned_draft,
                 "draft_status": DraftStatus.DRAFT,
                 "retry_count": 0,
                 "validation_errors": [],
+                "draft_history": history,
             }
         except Exception as exc:
             span.set_attribute("schema.outcome", "invalid")

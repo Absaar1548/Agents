@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
@@ -47,6 +48,22 @@ class RequestChangesResponse(BaseModel):
     mode: str
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _mutate_latest_draft_history(
+    graph, config: dict, state: dict, *, status: str, reviewed_by: str
+) -> None:
+    """Copy draft_history, mutate the latest entry, and write it back."""
+    history = list(state.get("draft_history") or [])
+    if history:
+        history[-1]["status"] = status
+        history[-1]["reviewed_by"] = reviewed_by
+        history[-1]["reviewed_at"] = _now_iso()
+        graph.update_state(config, {"draft_history": history})
+
+
 @router.post("/approve", response_model=ApproveResponse)
 def approve(body: ApproveRequest, request: Request) -> ApproveResponse:
     draft = _current_draft(request, body.session_id)
@@ -57,7 +74,11 @@ def approve(body: ApproveRequest, request: Request) -> ApproveResponse:
     # Persist approval into graph state
     graph = request.app.state.gathering_graph
     config = _config(body.session_id)
+    state = _read_graph_state(request, body.session_id)
     graph.update_state(config, {"draft_status": DraftStatus.APPROVED})
+    _mutate_latest_draft_history(
+        graph, config, state, status="approved", reviewed_by="user"
+    )
 
     with chat_span(
         "brd_agent.approve",
@@ -94,6 +115,9 @@ def request_changes(body: RequestChangesBody, request: Request) -> RequestChange
         "draft_status": DraftStatus.REJECTED,
         "rejection_count": rejection_count,
     })
+    _mutate_latest_draft_history(
+        graph, config, state, status="rejected", reviewed_by="user"
+    )
 
     with chat_span(
         "brd_agent.request_changes",

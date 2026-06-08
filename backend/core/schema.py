@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -79,3 +80,20 @@ class BRDResponse(BaseModel):
     risks: list[Risk] = Field(default_factory=list)
     drafted_at: datetime = Field(default_factory=_utcnow)
     drafted_by: str = Field(description="agent_id@version")
+
+
+# ---------------------------------------------------------------------------
+# Draft versioning API responses
+# ---------------------------------------------------------------------------
+
+class DraftsListResponse(BaseModel):
+    session_id: str
+    versions: list[int]
+    count: int
+    latest_status: Optional[str] = None
+
+
+class DraftDetailResponse(BaseModel):
+    session_id: str
+    entry: dict
+    draft: BRDResponse
