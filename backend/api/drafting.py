@@ -7,10 +7,11 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Request
+from langgraph.errors import GraphInterrupt
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
 
-from backend.api.deps import _config, _current_draft
+from backend.api.deps import _config, _current_draft, _read_graph_state
 from backend.core.schema import BRDResponse
 from backend.telemetry import (
     KIND_AGENT,
@@ -44,10 +45,38 @@ def generate_brd(body: GenerateBRDRequest, request: Request) -> DraftResponse:
         tags=["drafting"],
         track_outcome=True,
     ) as root:
-        result = graph.invoke(
-            {"mode": "drafting"},
-            config=_config(body.session_id),
-        )
+        try:
+            result = graph.invoke(
+                {"mode": "drafting"},
+                config=_config(body.session_id),
+            )
+        except GraphInterrupt:
+            # HITL 2: graph paused after schema_validate (interrupt_after)
+            # The draft is already persisted in state by schema_validate
+            state = _read_graph_state(request, body.session_id)
+            draft_dict = state.get("current_draft")
+            if draft_dict is None:
+                raise RuntimeError(
+                    "schema_validate completed but no current_draft in state"
+                )
+            draft = BRDResponse.model_validate(draft_dict)
+            root.set_attribute("brd.id", str(draft.brd_id))
+            set_input(root, f"draft from current thread state")
+            set_output(
+                root,
+                {
+                    "brd_id": str(draft.brd_id),
+                    "title": draft.title,
+                    "frs": len(draft.functional_requirements),
+                    "nfrs": len(draft.non_functional_requirements),
+                    "stakeholders": [s.name for s in draft.stakeholders],
+                },
+                mime="application/json",
+            )
+            set_outcome(root, "success")
+            return DraftResponse(draft=draft, mode="awaiting_approval")
+
+        # Normal completion (without interrupt_after, shouldn't happen)
         draft_dict = result.get("current_draft")
         if draft_dict is None:
             raise RuntimeError("drafting_graph did not produce a current_draft")

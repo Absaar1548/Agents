@@ -35,6 +35,10 @@ items. Don't re-ask. Build on them.
 - If the user asks you to "draft" or "generate" the BRD, tell them to click the \
 "Generate BRD" button — you can't draft from this conversational mode.
 
+When you believe you have gathered enough information to produce a complete \
+BRD, include the marker `[READY_FOR_PRODUCTION]` at the very end of your response. \
+Otherwise, continue asking clarifying questions.
+
 Output: plain conversational text. Do NOT output JSON in this mode.\
 """
 

@@ -389,6 +389,7 @@ class ContextAssembler:
         current_draft: Optional[dict] = None,
         feedback: Optional[str] = None,
         artifact_refs: Optional[list[dict]] = None,
+        validation_errors: Optional[list[str]] = None,
     ) -> AssembledContext:
         # Pick prompt by strategy: BRD_GENERATION → drafting, else gathering.
         if strategy == ContextStrategy.BRD_GENERATION:
@@ -463,6 +464,15 @@ class ContextAssembler:
             system_parts.append(artifact_block)
         if draft_block:
             system_parts.append(draft_block)
+
+        # Validation error injection for retry loop
+        if validation_errors:
+            error_block = (
+                "PREVIOUS_VALIDATION_ERRORS (please fix these in your response):\n"
+                + "\n".join(f"  - {e}" for e in validation_errors)
+            )
+            system_parts.append(error_block)
+
         system_content = "\n\n".join(system_parts)
 
         # Conversation slice

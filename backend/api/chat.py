@@ -1,6 +1,7 @@
 """Chat, reset, memory inspection, and tool endpoints.
 
-  POST /chat              { message, session_id }    → { reply, mode, draft?, turn_id }
+  POST /chat              { message, session_id }    → { reply, mode, draft?, turn_id, hitl? }
+  POST /resume            { session_id, action }     → { reply, mode, draft?, turn_id }
   POST /reset             { session_id }             → { status, session_id }
   GET  /memory            ?session_id={sid}          → { session_id, memory }
   POST /tools/fetch-brd-template { template_name, session_id } → { artifact_ref, available_templates, note }
@@ -12,6 +13,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, Request
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 from opentelemetry.trace import SpanKind
 from pydantic import BaseModel, Field
 
@@ -41,6 +44,19 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    reply: str
+    mode: str
+    draft: Optional[BRDResponse] = None
+    turn_id: int
+    hitl: Optional[dict] = None
+
+
+class ResumeRequest(BaseModel):
+    session_id: str = Field(...)
+    action: str = Field(..., pattern="^(proceed|add_more)$")
+
+
+class ResumeResponse(BaseModel):
     reply: str
     mode: str
     draft: Optional[BRDResponse] = None
@@ -104,10 +120,25 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
         if existing_draft:
             root.set_attribute("draft.id", str(existing_draft.brd_id))
 
-        result = graph.invoke(
-            {"messages": [HumanMessage(content=body.message)], "mode": mode},
-            config=_config(body.session_id),
-        )
+        try:
+            result = graph.invoke(
+                {"messages": [HumanMessage(content=body.message)], "mode": mode},
+                config=_config(body.session_id),
+            )
+        except GraphInterrupt as exc:
+            # HITL 1 triggered — return interrupt payload to frontend
+            interrupt_value = exc.args[0] if exc.args else {}
+            return ChatResponse(
+                reply="",
+                mode="hitl_1",
+                draft=None,
+                turn_id=0,
+                hitl={
+                    "type": interrupt_value.get("type", "hitl_1"),
+                    "summary": interrupt_value.get("summary"),
+                    "actions": interrupt_value.get("actions"),
+                },
+            )
 
         reply = result.get("reply_text", "")
         draft = _current_draft(request, body.session_id)
@@ -117,6 +148,48 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
         set_outcome(root, "success")
 
     return ChatResponse(reply=reply, mode=mode, draft=draft, turn_id=turn_id)
+
+
+@router.post("/resume", response_model=ResumeResponse)
+def resume(body: ResumeRequest, request: Request) -> ResumeResponse:
+    """Resume the gathering graph from a HITL 1 interrupt."""
+    graph = request.app.state.gathering_graph
+
+    with chat_span(
+        "brd_agent.resume",
+        session_id=body.session_id,
+        span_kind=KIND_AGENT,
+        otel_kind=SpanKind.SERVER,
+        chat_mode="resume",
+        tags=["resume", f"action={body.action}"],
+        track_outcome=True,
+    ) as root:
+        set_input(root, {"action": body.action})
+
+        try:
+            result = graph.invoke(
+                Command(resume=body.action),
+                config=_config(body.session_id),
+            )
+        except GraphInterrupt as exc:
+            # Shouldn't happen in normal flow, but handle gracefully
+            interrupt_value = exc.args[0] if exc.args else {}
+            return ResumeResponse(
+                reply="",
+                mode="hitl_1",
+                draft=None,
+                turn_id=0,
+            )
+
+        reply = result.get("reply_text", "")
+        draft = _current_draft(request, body.session_id)
+        turn_id = _turn_id(request, body.session_id)
+        mode = result.get("mode", "gathering")
+
+        set_output(root, reply)
+        set_outcome(root, "success")
+
+    return ResumeResponse(reply=reply, mode=mode, draft=draft, turn_id=turn_id)
 
 
 @router.post("/reset", response_model=ResetResponse)

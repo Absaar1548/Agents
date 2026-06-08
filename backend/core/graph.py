@@ -5,14 +5,26 @@ checkpointer. main.py invokes one of two compiled graphs per
 endpoint:
 
   gathering_graph  →  POST /chat, POST /request-changes
-                       retrieve_context → invoke_llm → extract_memory → END
-                       Adds the user's HumanMessage + an AIMessage to
-                       state.messages, updates state.brd_memory.
+                       summarize → retrieve_context → invoke_llm
+                                                ↓
+                              route_after_conversation (conditional)
+                                    ┌─────────┴─────────┐
+                                    │                   │
+                              extract_memory        hitl_gate
+                                    │               (interrupt)
+                                   END                 END
 
   drafting_graph   →  POST /generate-brd
-                       retrieve_context → draft_llm → schema_validate → END
-                       Does NOT add to state.messages; produces
-                       state.current_draft (a BRDResponse JSON).
+                       retrieve_context → draft_llm → schema_validate
+                                                          ↓
+                                        route_after_validation (conditional)
+                                    ┌──────────┴──────────┐
+                                    │                     │
+                                   END               draft_llm
+                              (interrupt_after)      (retry ≤2)
+                                    ↓
+                               error_handler
+                              (max retries)
 
 Telemetry: each node opens its own `chat_span` with the right
 openinference.span.kind. The Phase 1 root `brd_agent.turn` / `brd_agent.draft`
@@ -60,6 +72,24 @@ def _bind(fn, runtime: AgentRuntime):
     return node
 
 
+# ----- conditional routing functions -----
+def route_after_conversation(state: ChatbotState) -> str:
+    """After invoke_llm, route to hitl_gate if ready, else extract_memory."""
+    if state.get("ready_for_production"):
+        return "hitl_gate"
+    return "extract_memory"
+
+
+def route_after_validation(state: ChatbotState) -> str:
+    """After schema_validate, route based on success / retry / error."""
+    if state.get("current_draft") is not None:
+        return "__end__"
+    if (state.get("retry_count") or 0) < 2:
+        return "draft_llm"
+    return "error_handler"
+
+
+# ----- graph builders -----
 def build_gathering_graph(runtime: AgentRuntime, checkpointer):
     """gathering_graph: handles POST /chat and POST /request-changes.
 
@@ -67,6 +97,7 @@ def build_gathering_graph(runtime: AgentRuntime, checkpointer):
     node uses. Same wiring; different content per mode.
     """
     from backend.nodes.extract_memory import extract_memory
+    from backend.nodes.hitl_gate import hitl_gate
     from backend.nodes.invoke_llm import invoke_llm
     from backend.nodes.retrieve_context import retrieve_context
     from backend.nodes.summarize import summarize
@@ -76,11 +107,18 @@ def build_gathering_graph(runtime: AgentRuntime, checkpointer):
     g.add_node("retrieve_context", _bind(retrieve_context, runtime))
     g.add_node("invoke_llm", _bind(invoke_llm, runtime))
     g.add_node("extract_memory", _bind(extract_memory, runtime))
+    g.add_node("hitl_gate", _bind(hitl_gate, runtime))
+
     g.add_edge(START, "summarize")
     g.add_edge("summarize", "retrieve_context")
     g.add_edge("retrieve_context", "invoke_llm")
-    g.add_edge("invoke_llm", "extract_memory")
+    g.add_conditional_edges(
+        "invoke_llm",
+        route_after_conversation,
+        {"hitl_gate": "hitl_gate", "extract_memory": "extract_memory"},
+    )
     g.add_edge("extract_memory", END)
+    g.add_edge("hitl_gate", END)
     return g.compile(checkpointer=checkpointer)
 
 
@@ -91,6 +129,7 @@ def build_drafting_graph(runtime: AgentRuntime, checkpointer):
     BRDResponse. Does not extend messages or update memory.
     """
     from backend.nodes.draft import draft_llm
+    from backend.nodes.error_handler import error_handler
     from backend.nodes.retrieve_context import retrieve_context
     from backend.nodes.schema_validate import schema_validate
 
@@ -98,8 +137,18 @@ def build_drafting_graph(runtime: AgentRuntime, checkpointer):
     g.add_node("retrieve_context", _bind(retrieve_context, runtime))
     g.add_node("draft_llm", _bind(draft_llm, runtime))
     g.add_node("schema_validate", _bind(schema_validate, runtime))
+    g.add_node("error_handler", _bind(error_handler, runtime))
+
     g.add_edge(START, "retrieve_context")
     g.add_edge("retrieve_context", "draft_llm")
     g.add_edge("draft_llm", "schema_validate")
-    g.add_edge("schema_validate", END)
-    return g.compile(checkpointer=checkpointer)
+    g.add_conditional_edges(
+        "schema_validate",
+        route_after_validation,
+        {"__end__": END, "draft_llm": "draft_llm", "error_handler": "error_handler"},
+    )
+    g.add_edge("error_handler", END)
+    return g.compile(
+        checkpointer=checkpointer,
+        interrupt_after=["schema_validate"],
+    )

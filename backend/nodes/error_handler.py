@@ -17,5 +17,11 @@ def error_handler(
     config: RunnableConfig,
     runtime: AgentRuntime,
 ) -> dict[str, Any]:
-    """Stub — Phase 2 will implement max-retry error handling."""
-    return {}
+    """Graceful degradation after max schema validation retries exceeded."""
+    errors = state.get("validation_errors") or []
+    reply = (
+        "Unable to produce a valid BRD after 2 retries. "
+        f"Validation errors: {'; '.join(errors)}. "
+        "Please try again or adjust your requirements."
+    )
+    return {"reply_text": reply}

@@ -79,6 +79,7 @@ def retrieve_context(
 
         last_ret = state.get("last_retrievals") or {}
         artifact_refs = last_ret.get("artifact_refs") or []
+        validation_errors = state.get("validation_errors")
 
         assembled = runtime.assembler.assemble(
             strategy=strategy,
@@ -89,6 +90,7 @@ def retrieve_context(
             current_draft=current_draft,
             feedback=feedback,
             artifact_refs=artifact_refs,
+            validation_errors=validation_errors,
         )
 
         # Surface token accounting + prompt lineage on this span (the LLM

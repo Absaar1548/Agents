@@ -35,6 +35,13 @@ def api_chat(message: str, session_id: str) -> dict:
         return r.json()
 
 
+def api_resume(action: str, session_id: str) -> dict:
+    with _client() as c:
+        r = c.post("/resume", json={"action": action, "session_id": session_id})
+        r.raise_for_status()
+        return r.json()
+
+
 def api_generate(session_id: str) -> dict:
     with _client() as c:
         r = c.post("/generate-brd", json={"session_id": session_id})
@@ -83,6 +90,8 @@ def init_state() -> None:
         st.session_state.approved_brd_id = None
     if "session_id" not in st.session_state:
         st.session_state.session_id = uuid.uuid4().hex
+    if "hitl_1" not in st.session_state:
+        st.session_state.hitl_1 = None
 
 
 init_state()
@@ -100,6 +109,7 @@ with col_reset:
         st.session_state.messages = []
         st.session_state.current_draft = None
         st.session_state.approved_brd_id = None
+        st.session_state.hitl_1 = None
         st.rerun()
 with col_health:
     try:
@@ -117,6 +127,52 @@ if st.session_state.approved_brd_id:
         "Click 'Reset session' to start a new one.",
         icon="✅",
     )
+
+
+# ----- HITL 1 banner (when graph paused for user confirmation) -----
+if st.session_state.hitl_1:
+    hitl = st.session_state.hitl_1
+    st.divider()
+    st.markdown("### 📋 Ready for Production")
+    summary = hitl.get("summary", {})
+    st.markdown(f"**Title:** {summary.get('title', 'Untitled')}")
+    objectives = summary.get("objectives", [])
+    if objectives:
+        st.markdown("**Objectives:**")
+        for obj in objectives:
+            st.markdown(f"- {obj}")
+    open_questions = summary.get("open_questions", [])
+    if open_questions:
+        st.markdown(f"**Open questions:** {len(open_questions)}")
+    st.markdown(f"**Feedback items:** {summary.get('feedback_items', 0)}")
+
+    col_proceed, col_add = st.columns([1, 1])
+    with col_proceed:
+        if st.button("✅ Proceed to production", type="primary", use_container_width=True):
+            res = api_resume("proceed", st.session_state.session_id)
+            st.session_state.hitl_1 = None
+            # Now generate the BRD
+            res_gen = api_generate(st.session_state.session_id)
+            draft = res_gen["draft"]
+            st.session_state.current_draft = draft
+            st.session_state.messages.append(
+                {
+                    "role": "brd_draft",
+                    "brd_id": draft["brd_id"],
+                    "content": draft,
+                }
+            )
+            st.rerun()
+    with col_add:
+        if st.button("➕ Add more details", use_container_width=True):
+            res = api_resume("add_more", st.session_state.session_id)
+            st.session_state.hitl_1 = None
+            reply = res.get("reply", "")
+            if reply:
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": reply}
+                )
+            st.rerun()
 
 
 # ----- chat history -----
@@ -208,7 +264,7 @@ elif st.session_state.current_draft and not st.session_state.approved_brd_id:
 # ----- chat input -----
 if user_input := st.chat_input(
     "Tell me about your project...",
-    disabled=bool(st.session_state.approved_brd_id),
+    disabled=bool(st.session_state.approved_brd_id) or bool(st.session_state.hitl_1),
 ):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
@@ -218,15 +274,20 @@ if user_input := st.chat_input(
         with st.spinner("Thinking..."):
             try:
                 res = api_chat(user_input, st.session_state.session_id)
-                reply = res["reply"]
-                st.markdown(reply)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": reply}
-                )
-                # If the backend transitioned out of awaiting_approval (the
-                # user implicitly requested changes via plain chat), keep
-                # the local draft visible — the response payload carries it.
-                if res.get("draft"):
-                    st.session_state.current_draft = res["draft"]
+                # Phase 2: handle HITL 1 interrupt
+                if res.get("mode") == "hitl_1":
+                    st.session_state.hitl_1 = res.get("hitl")
+                    st.rerun()
+                else:
+                    reply = res["reply"]
+                    st.markdown(reply)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    # If the backend transitioned out of awaiting_approval (the
+                    # user implicitly requested changes via plain chat), keep
+                    # the local draft visible — the response payload carries it.
+                    if res.get("draft"):
+                        st.session_state.current_draft = res["draft"]
             except Exception as e:
                 st.error(f"backend error: {e}")

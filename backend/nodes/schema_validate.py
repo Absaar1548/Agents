@@ -1,9 +1,8 @@
 """schema_validate node — parses draft JSON and validates against BRDResponse.
 
 On success: writes the BRDResponse dump into state.current_draft.
-On failure: span is marked ERROR (via chat_span's exception path) and the
-error propagates — main.py's `chat_span` wrapping graph.invoke catches it
-and surfaces a 500 to the client.
+On failure: sets retry_count + validation_errors so the drafting graph can
+loop back to draft_llm (max 2 retries) before routing to error_handler.
 """
 from __future__ import annotations
 
@@ -15,8 +14,8 @@ from langchain_core.runnables import RunnableConfig
 from opentelemetry.trace import SpanKind
 
 from backend.core.graph import AgentRuntime
-from backend.core.state import ChatbotState
 from backend.core.schema import BRDResponse
+from backend.core.state import ChatbotState, DraftStatus
 from backend.telemetry import KIND_TOOL, chat_span
 
 DRAFTED_BY = "brd-agent@0.1.0"
@@ -73,10 +72,24 @@ def schema_validate(
             span.set_attribute("schema.fr_count", len(brd.functional_requirements))
             span.set_attribute("schema.nfr_count", len(brd.non_functional_requirements))
             span.set_attribute("schema.risk_count", len(brd.risks))
-        except Exception:
-            span.set_attribute("schema.outcome", "invalid")
-            span.set_attribute("schema.error_count", 1)
-            span.add_event("raw_snippet", attributes={"raw": raw[:500]})
-            raise
 
-        return {"current_draft": brd.model_dump(mode="json")}
+            # Success — return current_draft and reset retry counters
+            return {
+                "current_draft": brd.model_dump(mode="json"),
+                "draft_status": DraftStatus.DRAFT,
+                "retry_count": 0,
+                "validation_errors": [],
+            }
+        except Exception as exc:
+            span.set_attribute("schema.outcome", "invalid")
+            retry_count = (state.get("retry_count") or 0) + 1
+            errors = [str(exc)]
+            span.set_attribute("schema.error_count", len(errors))
+            span.set_attribute("schema.retry_count", retry_count)
+            span.add_event("raw_snippet", attributes={"raw": raw[:500]})
+
+            # Failure — return retry state for conditional edge routing
+            return {
+                "retry_count": retry_count,
+                "validation_errors": errors,
+            }

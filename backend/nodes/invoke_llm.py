@@ -16,6 +16,9 @@ from backend.core.graph import AgentRuntime
 from backend.core.state import ChatbotState
 from backend.telemetry import KIND_CHAIN, chat_span
 
+READY_MARKER = "[READY_FOR_PRODUCTION]"
+
+
 def invoke_llm(
     state: ChatbotState,
     config: RunnableConfig,
@@ -51,7 +54,14 @@ def invoke_llm(
             messages=messages, temperature=0.4, max_tokens=800
         )
 
+        # Phase 2: detect readiness marker
+        ready = READY_MARKER in reply
+        clean_reply = reply.replace(READY_MARKER, "").strip()
+        if ready:
+            span.set_attribute("hitl.ready_for_production", True)
+
         return {
-            "messages": [AIMessage(content=reply)],
-            "reply_text": reply,
+            "messages": [AIMessage(content=clean_reply)],
+            "reply_text": clean_reply,
+            "ready_for_production": ready,
         }
