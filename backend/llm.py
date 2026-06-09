@@ -31,6 +31,7 @@ class BaseLLMClient:
         messages: list[dict],
         max_tokens: int = 4000,
         temperature: float = 0.2,
+        timeout: Optional[float] = 60.0,
         response_format: Optional[dict] = None,
         **kwargs: Any,
     ) -> str:
@@ -66,6 +67,7 @@ class AzureOpenAIClient(BaseLLMClient):
         messages: list[dict],
         max_tokens: int = 4000,
         temperature: float = 0.2,
+        timeout: Optional[float] = 60.0,
         response_format: Optional[dict] = None,
         **kwargs: Any,
     ) -> str:
@@ -78,6 +80,7 @@ class AzureOpenAIClient(BaseLLMClient):
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
             **request_kwargs,
         )
         return response.choices[0].message.content or ""
@@ -107,6 +110,7 @@ class OllamaClient(BaseLLMClient):
         messages: list[dict],
         max_tokens: int = 4000,
         temperature: float = 0.2,
+        timeout: Optional[float] = 60.0,
         response_format: Optional[dict] = None,
         **kwargs: Any,
     ) -> str:
@@ -119,6 +123,7 @@ class OllamaClient(BaseLLMClient):
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
             **request_kwargs,
         )
         return response.choices[0].message.content or ""

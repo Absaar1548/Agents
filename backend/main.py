@@ -6,11 +6,12 @@ Lifespan builds the runtime, sources, graphs, and stores them on
 """
 from __future__ import annotations
 
+import yaml
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 # Load .env BEFORE telemetry/openai imports inside backend modules.
@@ -87,10 +88,22 @@ async def lifespan(app: FastAPI):
         gathering_graph = build_gathering_graph(runtime, checkpointer)
         drafting_graph = build_drafting_graph(runtime, checkpointer)
 
+        # Load agent manifest (YAML)
+        manifest_path = Path(__file__).parent / "core" / "manifest.yaml"
+        try:
+            with open(manifest_path) as f:
+                manifest = yaml.safe_load(f)
+            log.info("Loaded agent manifest from %s", manifest_path)
+        except Exception:
+            log.warning("Failed to load manifest from %s; using defaults", manifest_path)
+            manifest = None
+
         app.state.runtime = runtime
         app.state.gathering_graph = gathering_graph
         app.state.drafting_graph = drafting_graph
         app.state.store = store
+        app.state.docs_source = docs_source
+        app.state.manifest = manifest
 
         yield
         flush_telemetry()
@@ -108,5 +121,17 @@ app.include_router(upload_router)
 
 # ----- health -----
 @app.get("/health")
-def health() -> dict:
+def health(request: Request) -> dict:
+    manifest = getattr(request.app.state, "manifest", None)
+    if manifest:
+        return {
+            "ok": True,
+            "agent_id": manifest["agent"]["id"],
+            "version": manifest["agent"]["version"],
+            "capabilities": manifest.get("capabilities"),
+            "hitl_gates": manifest.get("hitl_gates"),
+            "guardrails": manifest.get("guardrails"),
+            "draft_versioning": manifest.get("draft_versioning"),
+        }
+    # Fallback to telemetry constants
     return {"ok": True, "agent_id": AGENT_ID, "version": SERVICE_VERSION}

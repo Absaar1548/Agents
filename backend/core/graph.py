@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import RetryPolicy
 
 from backend.artifacts import ArtifactStore
 from backend.context.assembler import ContextAssembler
@@ -72,6 +73,24 @@ def _bind(fn, runtime: AgentRuntime):
     return node
 
 
+# ----- retry policies -----
+
+# LLM-calling nodes: 3 attempts with 1s→2s→4s backoff
+llm_retry = RetryPolicy(
+    max_attempts=3,
+    initial_interval=1.0,
+    backoff_factor=2.0,
+)
+
+# Retrieval nodes: 2 attempts with 0.5s→1s backoff (lighter — transient
+# connections to Chroma / Neo4j resolve faster)
+retrieval_retry = RetryPolicy(
+    max_attempts=2,
+    initial_interval=0.5,
+    backoff_factor=2.0,
+)
+
+
 # ----- conditional routing functions -----
 def route_after_conversation(state: ChatbotState) -> str:
     """After invoke_llm, route to hitl_gate if ready, else extract_memory."""
@@ -103,10 +122,10 @@ def build_gathering_graph(runtime: AgentRuntime, checkpointer):
     from backend.nodes.summarize import summarize
 
     g = StateGraph(ChatbotState)
-    g.add_node("summarize", _bind(summarize, runtime))
-    g.add_node("retrieve_context", _bind(retrieve_context, runtime))
-    g.add_node("invoke_llm", _bind(invoke_llm, runtime))
-    g.add_node("extract_memory", _bind(extract_memory, runtime))
+    g.add_node("summarize", _bind(summarize, runtime), retry_policy=llm_retry)
+    g.add_node("retrieve_context", _bind(retrieve_context, runtime), retry_policy=retrieval_retry)
+    g.add_node("invoke_llm", _bind(invoke_llm, runtime), retry_policy=llm_retry)
+    g.add_node("extract_memory", _bind(extract_memory, runtime), retry_policy=retrieval_retry)
     g.add_node("hitl_gate", _bind(hitl_gate, runtime))
 
     g.add_edge(START, "summarize")
@@ -134,8 +153,8 @@ def build_drafting_graph(runtime: AgentRuntime, checkpointer):
     from backend.nodes.schema_validate import schema_validate
 
     g = StateGraph(ChatbotState)
-    g.add_node("retrieve_context", _bind(retrieve_context, runtime))
-    g.add_node("draft_llm", _bind(draft_llm, runtime))
+    g.add_node("retrieve_context", _bind(retrieve_context, runtime), retry_policy=retrieval_retry)
+    g.add_node("draft_llm", _bind(draft_llm, runtime), retry_policy=llm_retry)
     g.add_node("schema_validate", _bind(schema_validate, runtime))
     g.add_node("error_handler", _bind(error_handler, runtime))
 

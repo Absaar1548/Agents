@@ -1,25 +1,57 @@
-agent_id: "brd-agent"
-version: "0.1.0"
-display_name: "Business Requirements Document Agent"
-domain: "requirements"
+# BRD Agent Manifest
+# Loaded at startup, exposed via /health endpoint.
+# Single source of truth for agent identity, capabilities, and governance.
+
+agent:
+  id: brd-agent
+  version: "0.1.0"
+  description: "Conversational BRD authoring agent for NT financial services — PoC"
+
 capabilities:
-  - requirement_elicitation
-  - brd_generation
-  - brd_revision
-tools:
-  - chroma_vector_store
-  - neo4j_knowledge_graph
-  - fetch_brd_template
-prompts:
-  gathering: "brd-gathering@0.1.0"
-  drafting: "brd-drafting@0.1.0"
-  summarize: "brd-summarize@0.1.0"
+  modes: [gathering, drafting, request_changes]
+  memory: [typed_facts, rolling_summary]
+  context_sources: [vector_store, knowledge_graph]
+
 hitl_gates:
-  - hitl_1: "pre-production approval"
-  - hitl_2: "post-production review"
-reviewer_role: "Business Analyst / Product Owner"
-max_rejection_cycles: 3
-output_schema: "BRDResponse"
-llm_preference: "gpt-4o"
-guardrail_profile: "presidio-default"
-status: "active"
+  - name: hitl_1
+    description: "Confirm readiness before BRD production — agent presents summary, user chooses Proceed or Add More"
+    trigger: ready_for_production
+  - name: hitl_2
+    description: "Review and approve/reject the generated BRD — post schema_validate interrupt"
+    trigger: draft_status == DRAFT
+
+guardrails:
+  presidio:
+    mask_entities:
+      - CREDIT_CARD
+      - US_SSN
+      - EMAIL_ADDRESS
+      - PHONE_NUMBER
+      - US_BANK_NUMBER
+      - IBAN_CODE
+    log_only_entities:
+      - PERSON
+      - IP_ADDRESS
+
+draft_versioning:
+  enabled: true
+  provenance_fields:
+    - version
+    - prompt_hash
+    - context_strategy
+    - model
+    - provider
+    - token_accounting
+
+observability:
+  service_name: brd-agent
+  service_namespace: brd-poc
+  deployment_environment: local
+
+checkpointer:
+  type: sqlite
+  path: storage/checkpoints.db
+
+embedding:
+  provider: chroma_default
+  model: all-MiniLM-L6-v2
